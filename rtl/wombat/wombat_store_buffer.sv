@@ -3,8 +3,9 @@
 //
 //  Only host-qualified, non-faulting physical RAM writes may enter the
 //  queue (HP9K385: the window is the post_window input, computed by
-//  wombat_cpu from ram_mask; the Quadra's fixed RAM/DAFB decode is gone). Their upstream acknowledgement is registered when
-//  the transaction is captured; the writes then drain in order through the
+//  wombat_cpu from ram_mask; the Quadra's fixed RAM/DAFB decode is gone).
+//  Their upstream acknowledgement is registered when the transaction is
+//  captured; the writes then drain in order through the
 //  ordinary bus. Non-qualified writes cannot pass an older queued write, so a
 //  DAFB register write still sees every earlier pixel store landed; a read
 //  may pass one queued write to another 16-byte line (see pass_ok below).

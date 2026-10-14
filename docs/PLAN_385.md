@@ -17,6 +17,13 @@ Reference material:
 | 2026-10-14 | CPU vendored, files only: `rtl/ap68040/` (byte-identical to Quadra @ `011f7d9`) plus `rtl/wombat/{wombat_cpu,wombat_store_buffer,wombat_bus32}.sv` and `rtl/wombat/dpram.v`. Not yet in `files.qip`. |
 | 2026-10-14 | ROMs obtained and verified (MAME sets `hp9k380`, `dio98550`, `human_interface`). Boot ROM is **Rev 2.0, 29 Nov 90**. ROMs are never committed; see `docs/ROMS.md`. |
 | 2026-10-14 | `scratch/` is git-ignored and moves between machines as `scratch.zip` (also ignored). Anything that must survive goes in `docs/`. |
+| 2026-10-14 | `wombat_cpu` gets a runtime `ram_mask[11:0]` input (RAM = the top 2^n MB). The cacheable set is RAM plus the boot ROM; posted stores go to RAM only. `wombat_store_buffer` takes the window as `post_window`. Power-of-two RAM sizes only. |
+| 2026-10-14 | `rtl/hp385_top.sv` is the MiSTer-independent system. ROM, RAM and the card ROM sit behind one generic memory port (sel 0/1/2); the sim serves it from host arrays. |
+| 2026-10-14 | 8-bit devices on odd bytes go through one `io8` sequencer in the top. A beat is split into its odd lanes, one register access per clock, which matches the 030's dynamic bus sizing for longword/MOVEP accesses. Even lanes read 0xFF. |
+| 2026-10-14 | Writes into boot-ROM space are acked and ignored, except the LED latch at `$1FFFC-F` (odd lanes). The ROM's reset stack is at `$100-$200` *in ROM space*, so bus-error frames land there before RAM is known. |
+| 2026-10-14 | MC6840 written from the datasheet (`rtl/ptm6840.sv`): E/C1/C3 = 250 kHz (clk/132 at 33 MHz), O3→C2, IRQ 6. The comparison modes count as continuous because the gates are tied low. |
+| 2026-10-14 | MAME is a reference, not an oracle. Its 68040 pushes format $B bus-error frames where a real 040 (and AP68040) pushes format $7. `compare_mame.py` treats the resulting `$13EC` handler detour as expected. |
+| 2026-10-14 | ROM disassemblies (`docs/disasm/*.asm`) stay local (git-ignored) because they are derived from copyrighted ROMs. The analysis README and the generator and patch tools are committed. |
 
 ---
 
@@ -188,4 +195,4 @@ Each phase ends with a concrete, testable milestone.
 
 1. Fetch NetBSD hp300 sources (locore.s, machdep.c, `dev/{spc,dma,hil,diofb,nereid}*`) into `scratch/` to settle §6.1/§6.3 and to serve as a second spec next to MAME. Record the conclusions in `docs/`.
 2. ~~Locate the three ROM images and verify their CRCs~~ (done).
-3. Phase 0 steps 1–3. The kickoff prompt is in `docs/RESUME-20261014-phase0.md`.
+3. ~~Phase 0 steps 1–3~~ (done 2026-10-14; results in `docs/BOOT_SIM.md`). The ROM reaches the 8042 self-test (code 0x22) in sim. Next: VRAM + Catseye STATUS, then the 8042 (Phase 1 items 5-6).

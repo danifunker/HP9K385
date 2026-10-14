@@ -410,13 +410,13 @@ always @(posedge clk) begin
 end
 
 wire        snp_stb  = snoop_stb | wsnp_pend;
+wire [31:0] snp_addr = snoop_stb ? snoop_addr : wsnp_addr;
 
 // HP 300 RAM window predicate on physical address bits [31:20]
 function ram_window;
 	input [11:0] a;
 	ram_window = &(a | ~ram_mask);
 endfunction
-wire [31:0] snp_addr = snoop_stb ? snoop_addr : wsnp_addr;
 
 generate
 if (AP040_ENABLE_CACHE != 0) begin : g_cache

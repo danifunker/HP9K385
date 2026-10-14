@@ -53,7 +53,19 @@ Vendored into this repo (files only, **not yet in `files.qip`**):
   - Also `snoop_stb/addr`, `nresetout` (the RESET instruction), `cacr_out` and `vbr_out`.
 - **Not** a real 040 TS/TA/TT/TM bus, so there is no dynamic bus sizing. The DIO bridge must split accesses for narrow ports.
 
-### Mac-specific spots to parameterize in `wombat_cpu.sv`
+### HP9K385 changes to the vendored wombat files (2026-10-14)
+
+`rtl/ap68040/` is still byte-identical to the Quadra. Only `rtl/wombat/` changed:
+
+- **`wombat_cpu.sv`** has a new input, `ram_mask[11:0]`. A physical address is RAM when every bit of `addr[31:20]` selected by `ram_mask` is 1. Examples: 8 MB = `12'hFF8`, 16 MB = `12'hFF0`, 128 MB = `12'hF80`.
+  - `cache_allow` is now RAM or the boot ROM (`addr[31:17] == 0`). It used to be Quadra RAM `$0-$3FFFFFFF` plus ROM `$4xxxxxxx`.
+  - `c_post_ok` / `c_post_ok_hint` now allow RAM only. They used to allow Quadra RAM plus the DAFB VRAM window `$F90xxxxx`. The hint uses `mm_hint_ptag[21:10]`, which is physical `addr[31:20]`.
+- **`wombat_store_buffer.sv`** has a new input, `post_window`, which `wombat_cpu` drives with the same RAM predicate on `cpu_bus_addr`. It replaces the buffer's own Mac decode (`s_addr[31:30] == 0` or the DAFB window).
+- Everything else in both files is unchanged.
+- **Regression:** `scripts/cpu_regression.sh` passes all three legs (base, LEA+XSTORE, release), 34 checks each. It runs upstream's `run_tests.sh` through `sh`, because upstream ships the script without the exec bit.
+- **Boot ROM requirement:** CPU detection (`$131C`) needs CACR bit 31 to read back. AP68040 does this, and the ROM takes the 68040 path.
+
+### Mac-specific spots that were parameterized in `wombat_cpu.sv` (original notes)
 
 - `cache_allow` (~line 411): Mac RAM/ROM windows. For HP300, use RAM (top N MB, below 0xFFFFFFFF) and the boot ROM. DIO, 0x5Fxxxx and VRAM must be uncached.
 - `c_post_ok` / `c_post_ok_hint` (~lines 448-451): posted-store windows, including the DAFB $F90 VRAM. For HP300, use RAM only.
