@@ -43,9 +43,7 @@ assign HDMI_FREEZE = 0;
 assign HDMI_BLACKOUT = 0;
 assign HDMI_BOB_DEINT = 0;
 
-assign AUDIO_S = 0;
-assign AUDIO_L = 0;
-assign AUDIO_R = 0;
+assign AUDIO_S   = 1;              // signed: the keyboard beeper (SN76494)
 assign AUDIO_MIX = 0;
 
 assign LED_DISK = 0;
@@ -202,6 +200,9 @@ wire [21:2] vram_addr;
 wire  [3:0] vram_be;
 wire [31:0] vram_wdata, vram_rdata;
 wire  [7:0] display_enable;
+wire signed [15:0] beep;
+assign AUDIO_L = beep;
+assign AUDIO_R = beep;
 wire  [7:0] leds;
 
 wire        key_stb;
@@ -259,6 +260,7 @@ hp385_top machine
 	.vram_wdata(vram_wdata),
 	.vram_ack(vram_ack),
 	.vram_rdata(vram_rdata),
+	.audio(beep),
 	.display_enable(display_enable),
 	.gfx_unsupported(),
 	.pix_index(pal_idx),

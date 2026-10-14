@@ -22,8 +22,8 @@
 //  as HIL keycodes on kbd_stb/kbd_code (bit 0 = release); mouse reports as
 //  relative motion and buttons on mouse_*.
 //
-//  The RTC is rtl/msm58321.sv, set from MiSTer's RTC; beeper writes are
-//  dropped (SN76494 still to do).
+//  The RTC is rtl/msm58321.sv, set from MiSTer's RTC; the beeper is
+//  rtl/sn76494.sv (a byte on P1 is written when P2.7 goes low).
 //============================================================================
 
 module hil_card
@@ -52,6 +52,8 @@ module hil_card
 	input signed [8:0] mouse_dx,      // right positive
 	input signed [8:0] mouse_dy,      // up positive
 	input       [2:0] mouse_btn,      // {middle, right, left}
+
+	output signed [15:0] audio,
 
 	output            irq1,
 	output            nmi,            // keyboard reset NMI (IRQ 7) / KBDNMIST
@@ -117,6 +119,15 @@ reg  [7:0] p2_q;
 always @(posedge clk) p2_q <= reset ? 8'hFF : p2_out;
 wire mlc_wr   = ((p2_out[0] | p2_out[1]) == 1'b0) && ((p2_q[0] | p2_q[1]) != 1'b0);
 wire latch_up = p2_out[3] && !p2_q[3];
+wire snd_wr   = !p2_out[7] && p2_q[7];
+
+sn76494 beeper (
+	.clk(clk),
+	.reset(reset),
+	.wr(snd_wr),
+	.din(p1_out),
+	.audio(audio)
+);
 
 always @(posedge clk)
 	if (reset) latch_data <= 8'h00;

@@ -8,8 +8,8 @@
 //  transfers through dreq / dack, MESSAGE IN with ACK held, bus-free
 //  interrupt), and checks INTS, SSTS, PSNS, status and message bytes.
 //
-//  verilator --binary --timing -Wno-fatal -Wno-WIDTH --top-module tb_scsi \
-//      tb/tb_scsi.sv rtl/scsi/mb87030.sv rtl/scsi/scsi_disk.sv
+//  Build:  verilator --binary --timing -Wno-fatal -Wno-WIDTH --top-module tb_scsi
+//          tb/tb_scsi.sv rtl/scsi/mb87030.sv rtl/scsi/scsi_disk.sv
 //============================================================================
 
 `timescale 1ns/1ps
@@ -310,11 +310,11 @@ task automatic dma_xfer(input bit in, input [2:0] ph, input int n);
 	dma_in = in; dma_idx = 0;
 	wr(PCTL, {5'd0, ph});
 	wr_tc(n);
-	dma_left = n;
+	dma_left = n + 4;                        // the DMA count is generous: dreq must stop at TC
 	wr(SCMD, 8'h80);
 	wait_ints(v);
 	chk(v == 8'h10, $sformatf("DMA phase %0d: INTS %02x, want 10", ph, v));
-	chk(dma_left == 0, $sformatf("DMA left %0d bytes", dma_left));
+	chk(dma_left == 4, $sformatf("DMA moved %0d bytes, want %0d", n + 4 - dma_left, n));
 	dma_left = 0;
 	clr_ints(v);
 	rd(SSTS, s);
@@ -353,8 +353,10 @@ task automatic run_cmd(input int tgt, input bit atn, input bit arb, input int cl
 		wait_req(ph);
 		rd(PSNS, p);
 		chk(p == 8'hAE, $sformatf("MESSAGE OUT PSNS %02x, want AE", p));
+		m = obuf[0];
 		obuf[0] = 8'h80;                     // IDENTIFY, LUN 0
 		prg_out(3'd6, 1, 0);
+		obuf[0] = m;
 	end
 	last_in = 0;
 	stat = 8'hFF;
@@ -526,7 +528,11 @@ initial begin
 	chk(st == 8'h00, "WRITE(10) status");
 	chk(blk_writes == 2, $sformatf("%0d block writes, want 2", blk_writes));
 	bad = 0;
-	for (int i = 0; i < NBLK*512; i++) if (img[i] != golden[i]) bad++;
+	for (int i = 0; i < NBLK*512; i++)
+		if (img[i] != golden[i]) begin
+			if (bad == 0) $display("  first difference at image byte %0d: %02x, want %02x", i, img[i], golden[i]);
+			bad++;
+		end
 	chk(bad == 0, $sformatf("image after WRITE(10): %0d bytes differ", bad));
 	for (int i = 0; i < 2048; i++) dbuf[i] = 8'h00;
 	set_cdb10(8'h28, 9, 4);

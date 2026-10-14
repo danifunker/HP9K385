@@ -30,3 +30,10 @@ The bench was mutation-checked on 2026-10-14. A swapped rule-index order and off
 | `tb_ps2_hil_keymap.sv` | **passes** | `iverilog -g2012 -o build/tbk.vvp tb/tb_ps2_hil_keymap.sv rtl/ps2_hil_keymap.sv && vvp -n build/tbk.vvp` |
 | `tb_hp98620.sv` | **passes**: ID, device→memory and memory→device transfers in byte, word and longword units through both register sets, the interrupt level, clear-on-read, bus-error abort and general-control disarm | `iverilog -g2012 -o build/tb_dma.vvp tb/tb_hp98620.sv rtl/hp98620.sv && vvp -n build/tb_dma.vvp` |
 | `tb_msm58321.sv` | **passes**: set from the MiSTer RTC, year end, leap and non-leap February, 30-day month, 12-hour midnight, register reads and writes | `iverilog -g2012 -o build/tb_rtc.vvp tb/tb_msm58321.sv rtl/msm58321.sv && vvp -n build/tb_rtc.vvp` |
+| `tb_sn76494.sv` | **passes**: tone frequency at the HP clock (f = 333,333/(4N)) and silence at attenuation 15 | `iverilog -g2012 -o build/tb_snd.vvp tb/tb_sn76494.sv rtl/sn76494.sv && vvp -n build/tb_snd.vvp` |
+
+## SCSI
+
+| Bench | Status | Run |
+|---|---|---|
+| `tb_scsi.sv` | **passes**. One MB87030 and two `scsi_disk` targets (one without an image) on an ORed bus, with an hps_io-timed block model. Covers selection with ATN and IDENTIFY, INQUIRY, TEST UNIT READY, READ CAPACITY, DMA READ and WRITE(10), READ(6), MODE SENSE, sense paths, NOT READY on the empty disk, and selection timeout. 9 mutations were checked; all are caught. | `verilator --binary --timing -Wno-fatal -Wno-WIDTH --top-module tb_scsi --Mdir build/obj_tb_scsi -o tb tb/tb_scsi.sv rtl/scsi/mb87030.sv rtl/scsi/scsi_disk.sv && build/obj_tb_scsi/tb` |

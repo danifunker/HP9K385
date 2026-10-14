@@ -84,6 +84,7 @@ module hp385_top
 	output     [31:0] vram_wdata,
 	input             vram_ack,
 	input      [31:0] vram_rdata,
+	output signed [15:0] audio,           // HIL card beeper
 	output      [7:0] display_enable,
 	output            gfx_unsupported,
 	// colour of a video pixel value through the Nereid (display enable and
@@ -403,6 +404,7 @@ hil_card hil (
 	.host_din(io8_wdata),
 	.host_dout(hil_dout),
 	.rtc_set(rtc_set),
+	.audio(audio),
 	.kbd_stb(hil_key_stb),
 	.kbd_code(hil_key_code),
 	.mouse_stb(hil_mouse_stb),
