@@ -75,6 +75,7 @@ localparam CONF_STR = {
 wire   [1:0] buttons;
 wire [127:0] status;
 wire  [10:0] ps2_key;
+wire  [64:0] rtc;
 
 wire        ioctl_download;
 wire  [15:0] ioctl_index;
@@ -95,6 +96,7 @@ hps_io #(.CONF_STR(CONF_STR), .WIDE(1)) hps_io
 	.status_menumask(16'd0),
 
 	.ps2_key(ps2_key),
+	.RTC(rtc),
 
 	.ioctl_download(ioctl_download),
 	.ioctl_index(ioctl_index),
@@ -232,6 +234,7 @@ hp385_top machine
 
 	.leds(leds),
 
+	.rtc_set(rtc),
 	.hil_key_stb(key_stb),
 	.hil_key_code(key_code),
 	.hil_rom_wr(hil_wr),

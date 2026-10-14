@@ -59,6 +59,9 @@ module hp385_top
 
 	output reg  [7:0] leds,
 
+	// real-time clock seed (hps_io RTC, MSM6242B layout; bit 64 toggles)
+	input      [64:0] rtc_set,
+
 	// HIL keyboard: one HIL keycode per strobe (bit 0 = release)
 	input             hil_key_stb,
 	input       [7:0] hil_key_code,
@@ -394,6 +397,7 @@ hil_card hil (
 	.host_a0(io8_addr[1]),
 	.host_din(io8_wdata),
 	.host_dout(hil_dout),
+	.rtc_set(rtc_set),
 	.kbd_stb(hil_key_stb),
 	.kbd_code(hil_key_code),
 	.irq1(hil_irq1),

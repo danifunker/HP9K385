@@ -26,8 +26,8 @@
 //  which raises its interrupt.  Key events arrive as HIL keycodes on
 //  kbd_stb/kbd_code (bit 0 = release) into an 8-deep queue.
 //
-//  The RTC (MSM58321) and the beeper are stubs: RTC reads return 0, beeper
-//  writes are dropped.
+//  The RTC is rtl/msm58321.sv, set from MiSTer's RTC; beeper writes are
+//  dropped (SN76494 still to do).
 //============================================================================
 
 module hil_card
@@ -47,6 +47,8 @@ module hil_card
 	input             host_a0,
 	input       [7:0] host_din,
 	output      [7:0] host_dout,
+
+	input      [64:0] rtc_set,        // hps_io RTC (MSM6242B layout, bit 64 toggles)
 
 	input             kbd_stb,
 	input       [7:0] kbd_code,
@@ -69,7 +71,20 @@ reg  [7:0] latch_data;
 wire       mlc_int;
 wire       hil_read = (p2_out[0] | p2_out[2]) == 1'b0;
 wire [7:0] mlc_dout;
-wire [7:0] p1_in = hil_read ? mlc_dout : latch_data[5] ? 8'h00 /* RTC stub */ : 8'hFF;
+wire [3:0] rtc_dout;
+wire [7:0] p1_in = hil_read ? mlc_dout : latch_data[5] ? {4'h0, rtc_dout} : 8'hFF;
+
+msm58321 rtc (
+	.clk(clk),
+	.reset(reset),
+	.cs2(latch_data[4]),
+	.read(latch_data[5]),
+	.write(p2_out[2]),
+	.address_write(p2_out[1]),
+	.din(p1_out[3:0]),
+	.dout(rtc_dout),
+	.rtc_set(rtc_set)
+);
 
 upi41 cpu (
 	.clk(clk),

@@ -25,6 +25,7 @@ V_SRC = \
 	$(RTL)/nereid.sv \
 	$(RTL)/upi41.sv \
 	$(RTL)/hil_card.sv \
+	$(RTL)/msm58321.sv \
 	$(RTL)/hpib.sv \
 	$(RTL)/hp98620.sv \
 	$(RTL)/wombat/wombat_cpu.sv \

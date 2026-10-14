@@ -34,6 +34,7 @@
 #include "verilated_fst_c.h"
 
 #include <cstdint>
+#include <ctime>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -244,6 +245,18 @@ int main(int argc, char **argv) {
 	if (fst_path) { Verilated::traceEverOn(true); fst = new VerilatedFstC; top->trace(fst, 99); fst->open(fst_path); }
 
 	top->ram_mask = (0xFFF << lg) & 0xFFF;
+
+	// RTC seed: host local time in hps_io's MSM6242B BCD layout
+	{
+		time_t now = time(nullptr);
+		struct tm *lt = localtime(&now);
+		auto bcd = [](int v) -> uint64_t { return (uint64_t)(((v / 10) << 4) | (v % 10)); };
+		uint64_t r = bcd(lt->tm_sec) | bcd(lt->tm_min) << 8 | bcd(lt->tm_hour) << 16 | bcd(lt->tm_mday) << 24 |
+		             bcd(lt->tm_mon + 1) << 32 | bcd(lt->tm_year % 100) << 40 | (uint64_t)lt->tm_wday << 48;
+		top->rtc_set[0] = (uint32_t)r;
+		top->rtc_set[1] = (uint32_t)(r >> 32);
+		top->rtc_set[2] = 0;
+	}
 	top->ce = 1;
 	top->reset = 1;
 	top->clk = 0;
@@ -270,6 +283,7 @@ int main(int argc, char **argv) {
 			top->hil_rom_wr = 1; top->hil_rom_addr = cycle; top->hil_rom_data = hilrom[cycle];
 		} else top->hil_rom_wr = 0;
 		if (cycle == reset_clks) top->reset = 0;
+		if (cycle == reset_clks + 16) top->rtc_set[2] = 1;     // bit 64: "RTC updated"
 		top->hil_key_stb = 0;
 		for (auto &k : keys)
 			if (k.first == cycle) {
