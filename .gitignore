@@ -73,3 +73,11 @@ __pycache__/
 scripts/local.env
 # Claude Code local permissions (machine-specific)
 .claude/settings.local.json
+
+# Local build/sim outputs
+/build/
+verilator/obj_dir/
+verilator/out/
+
+# ROM disassemblies are derived from copyrighted HP firmware: local only
+docs/disasm/

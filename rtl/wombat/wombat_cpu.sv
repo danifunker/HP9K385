@@ -1,6 +1,10 @@
 //============================================================================
 //  wombat_cpu — AP68040 bundled for the Quadra 800's flat 32-bit bus.
 //
+//  HP9K385: the Quadra's fixed cacheability and posted-store windows are
+//  replaced by the HP 300 map (ram_mask + the boot ROM); see
+//  docs/reference/ap68040-integration.md for the diff.
+//
 //  Same core+MMU+cache wiring as ap040_tg68k_compat (the configuration the
 //  silicon campaign validated), minus the 16-bit Minimig bus adapter: the
 //  post-cache 32-bit transaction port is exported directly for djMEMC.
@@ -43,8 +47,14 @@ module wombat_cpu
 	input         cache_line_valid,
 	input  [31:4] cache_line_tag,
 	input [127:0] cache_line_data,
-	// High only when low physical addresses select non-faulting RAM.
+	// High only when the RAM window selects non-faulting RAM.
 	input         store_buffer_ok,
+	// HP 300 main RAM grows down from $FFFFFFFF: a physical address is RAM
+	// when every address bit [31:20] set in ram_mask is 1 (8 MB = 12'hFF8,
+	// 16 MB = 12'hFF0, ... 128 MB = 12'hF80).  RAM is cacheable and may take
+	// posted stores; the boot ROM ($00000000-$0001FFFF) is cacheable; all
+	// else (DIO space, $5Fxxxx, VRAM) is uncached and never posted.
+	input  [11:0] ram_mask,
 
 	// post-cache 32-bit transaction bus (physical addresses)
 	output        bus_req,
@@ -400,15 +410,21 @@ always @(posedge clk) begin
 end
 
 wire        snp_stb  = snoop_stb | wsnp_pend;
+
+// HP 300 RAM window predicate on physical address bits [31:20]
+function ram_window;
+	input [11:0] a;
+	ram_window = &(a | ~ram_mask);
+endfunction
 wire [31:0] snp_addr = snoop_stb ? snoop_addr : wsnp_addr;
 
 generate
 if (AP040_ENABLE_CACHE != 0) begin : g_cache
-	// Quadra 800 physical cacheability: RAM space (djMEMC banks,
-	// $00000000-$3FFFFFFF) and the ROM window ($40000000-$4FFFFFFF) may be
-	// cached; IOSB I/O, DAFB VRAM/registers and NuBus must never be.  With
+	// HP 300 physical cacheability: main RAM and the boot ROM may be
+	// cached; DIO I/O, the $5Fxxxx system registers and the 98550 VRAM
+	// (changed behind the CPU by the window mover) must never be.  With
 	// translation on, the MMU's CM attributes (mm_nocache) still override.
-	wire cache_allow = (mm_addr[31:30] == 2'b00) || (mm_addr[31:28] == 4'h4);
+	wire cache_allow = ram_window(mm_addr[31:20]) || (mm_addr[31:17] == 15'd0);
 
 	ap040_cache cache (
 		.clk(clk),
@@ -443,12 +459,10 @@ if (AP040_ENABLE_CACHE != 0) begin : g_cache
 		.c_wdata(mm_wdata),
 		.c_fc(mm_fc),
 		.c_nocache(mm_nocache | ~cache_allow),
-		// same qualifier as wombat_store_buffer's buffer_req
-		// same qualifier as wombat_store_buffer's buffer_req: RAM and the DAFB VRAM window
-		.c_post_ok_hint(store_buffer_ok && ((mm_hint_ptag[21:20] == 2'b00) ||
-		                                    (mm_hint_ptag[21:11] == 11'b1111_1001_000))),
-		.c_post_ok(store_buffer_ok && ((mm_addr[31:30] == 2'b00) ||
-		                               (mm_addr[31:21] == 11'b1111_1001_000))),
+		// same qualifier as wombat_store_buffer's buffer_req: RAM only
+		// (mm_hint_ptag is physical address bits [31:10])
+		.c_post_ok_hint(store_buffer_ok && ram_window(mm_hint_ptag[21:10])),
+		.c_post_ok(store_buffer_ok && ram_window(mm_addr[31:20])),
 		.s_stb(snp_stb),
 		.s_addr(snp_addr),
 		.c_ack(mm_ack),
@@ -500,6 +514,7 @@ wombat_store_buffer #(.ENABLE(AP040_STORE_BUFFER)) store_buffer (
 	.nreset(nreset),
 	.ce(ce),
 	.buffer_writes(store_buffer_ok),
+	.post_window(ram_window(cpu_bus_addr[31:20])),
 
 	.s_req(cpu_bus_req),
 	.s_posted(cpu_bus_posted),

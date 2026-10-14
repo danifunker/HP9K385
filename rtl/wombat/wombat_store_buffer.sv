@@ -1,9 +1,9 @@
 //============================================================================
 //  wombat_store_buffer — two-entry ordered CPU write queue.
 //
-//  Only host-qualified, non-faulting physical RAM writes -- and writes into
-//  the DAFB VRAM window, which is on-chip block RAM that can never fault --
-//  may enter the queue. Their upstream acknowledgement is registered when
+//  Only host-qualified, non-faulting physical RAM writes may enter the
+//  queue (HP9K385: the window is the post_window input, computed by
+//  wombat_cpu from ram_mask; the Quadra's fixed RAM/DAFB decode is gone). Their upstream acknowledgement is registered when
 //  the transaction is captured; the writes then drain in order through the
 //  ordinary bus. Non-qualified writes cannot pass an older queued write, so a
 //  DAFB register write still sees every earlier pixel store landed; a read
@@ -24,6 +24,7 @@ module wombat_store_buffer
 	input             nreset,
 	input             ce,
 	input             buffer_writes,
+	input             post_window,  // s_addr is in the postable RAM window
 
 	// CPU/cache side: level-held transaction, one-cycle acknowledgement.
 	input             s_req,
@@ -64,16 +65,10 @@ reg [31:0] q0_addr,  q1_addr, q2_addr, q3_addr;
 reg [31:0] q0_wdata, q1_wdata, q2_wdata, q3_wdata;
 reg  [2:0] q0_fc,    q1_fc, q2_fc, q3_fc;
 
-// Wombat's physical RAM window occupies the low 1 GB. buffer_writes excludes
-// the boot overlay; the remaining address check excludes the fixed ROM window
-// and every device region even if a caller accidentally leaves the qualifier
-// high. The DAFB VRAM window ($F9000000-$F91FFFFF, the machine's decode 2)
-// is added explicitly: QuickDraw's pixel stores are the hottest uncached
-// writes in the machine, and posting them hides the platform round trip
-// exactly as it does for RAM.
-wire vram_window = (s_addr[31:21] == 11'b1111_1001_000);
-wire buffer_req = (ENABLE != 0) && buffer_writes && s_req && s_write &&
-	                 ((s_addr[31:30] == 2'b00) || vram_window);
+// buffer_writes is the host's global qualifier; post_window decodes s_addr
+// so ROM and every device region are excluded even if a caller accidentally
+// leaves the qualifier high.
+wire buffer_req = (ENABLE != 0) && buffer_writes && post_window && s_req && s_write;
 
 // accept_ack doubles as the held-request guard. In the cycle after capture it
 // prevents the still-asserted request from being enqueued twice, matching the
