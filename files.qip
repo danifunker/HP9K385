@@ -19,6 +19,8 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/hp98620.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/scsi/mb87030.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/scsi/scsi_disk.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/hp98265a.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/uart8250.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/hp98644.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ps2_hil_keymap.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/vram_ddr3.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/hp385_top.sv

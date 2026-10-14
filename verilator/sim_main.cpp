@@ -324,6 +324,7 @@ int main(int argc, char **argv) {
 	if (fst_path) { Verilated::traceEverOn(true); fst = new VerilatedFstC; top->trace(fst, 99); fst->open(fst_path); }
 
 	top->ram_mask = (0xFFF << lg) & 0xFFF;
+	top->uart_rxd = 1; top->uart_cts_n = 0; top->uart_dsr_n = 0; top->uart_dcd_n = 0;
 
 	// RTC seed: host local time in hps_io's MSM6242B BCD layout
 	{
@@ -447,6 +448,14 @@ int main(int argc, char **argv) {
 				        a, top->ev_be, top->ev_data, top->ev_fc, top->ev_walker ? " walker" : "",
 				        pc, region_name(a));
 			}
+		}
+
+		// 98644 serial output, a line at a time
+		if (top->uart_tx_stb) {
+			static std::string line;
+			char c = (char)top->uart_tx_byte;
+			if (c == '\n' || line.size() > 200) { printf("[SERIAL] %s\n", line.c_str()); line.clear(); }
+			else if (c != '\r') line += (c >= 32 && c < 127) ? c : '.';
 		}
 
 		if (top->leds != last_leds) {

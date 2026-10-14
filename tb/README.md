@@ -37,3 +37,9 @@ The bench was mutation-checked on 2026-10-14. A swapped rule-index order and off
 | Bench | Status | Run |
 |---|---|---|
 | `tb_scsi.sv` | **passes**. One MB87030 and two `scsi_disk` targets (one without an image) on an ORed bus, with an hps_io-timed block model. Covers selection with ATN and IDENTIFY, INQUIRY, TEST UNIT READY, READ CAPACITY, DMA READ and WRITE(10), READ(6), MODE SENSE, sense paths, NOT READY on the empty disk, and selection timeout. 9 mutations were checked; all are caught. | `verilator --binary --timing -Wno-fatal -Wno-WIDTH --top-module tb_scsi --Mdir build/obj_tb_scsi -o tb tb/tb_scsi.sv rtl/scsi/mb87030.sv rtl/scsi/scsi_disk.sv && build/obj_tb_scsi/tb` |
+
+## Serial
+
+| Bench | Status | Run |
+|---|---|---|
+| `tb_uart8250.sv` | **passes**. Covers internal loopback (data, IIR, MSR lines), THRE interrupt, 8N1 over a wire with the bit period checked, 7E1, a stick-parity error and overrun. It found a real bug: an LSR read in the same clock as a received error lost the error. | `verilator --binary --timing -Wno-fatal -Wno-WIDTH --top-module tb_uart8250 --Mdir build/obj_tb_uart -o tb tb/tb_uart8250.sv rtl/uart8250.sv && build/obj_tb_uart/tb` (iverilog is too slow for this one) |

@@ -18,6 +18,7 @@
 //                                boot2.rom  8042 firmware 1820-4784.bin
 //    SCSI       98265A at select code 14: S0 / S1 disk images on IDs 0 / 1,
 //               S2 CD-ROM on ID 2 (Main's support/hp9k translates CUE/CHD)
+//    serial     98644 at select code 9 on MiSTer's UART (USER port)
 //    keyboard   PS/2 -> HP-HIL ITF keycodes -> the HIL loop
 //    mouse      PS/2 mouse -> HP 46060B on the HIL loop
 //
@@ -34,7 +35,6 @@ module emu
 
 assign ADC_BUS  = 'Z;
 assign USER_OUT = '1;
-assign {UART_RTS, UART_TXD, UART_DTR} = 0;
 assign {SD_SCK, SD_MOSI, SD_CS} = 'Z;
 
 assign VGA_SL = 0;
@@ -298,6 +298,16 @@ hp385_top machine
 	.sd_buff_dout(sd_buff_dout),
 	.sd_buff_wr(sd_buff_wr),
 	.sd_buff_din(m_sd_buff_din),
+
+	.uart_txd(UART_TXD),
+	.uart_rxd(UART_RXD),
+	.uart_rts_n(UART_RTS),
+	.uart_dtr_n(UART_DTR),
+	.uart_cts_n(UART_CTS),
+	.uart_dsr_n(UART_DSR),
+	.uart_dcd_n(1'b0),               // no DCD on the MiSTer port: carrier always present
+	.uart_tx_stb(),
+	.uart_tx_byte(),
 
 	.hil_rom_wr(hil_wr),
 	.hil_rom_addr(hil_addr),

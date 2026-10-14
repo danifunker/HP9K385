@@ -16,6 +16,7 @@
 //                         reset/ID $560001, interrupt reg $560003,
 //                         Catseye regs $564000 (catseye.sv), Nereid $566000
 //    $00500000-$0050020F  98620C DMA (hp98620.sv), interrupt level programmable
+//    $00690000-$0069003F  98644 serial, select code 9 (hp98644.sv), IRQ 5
 //    $006E0000-$006E07FF  98265A SCSI, select code 14 (hp98265a.sv), IRQ 4
 //    $005F4000-$005F400F  system-control registers (16 bytes of RAM, as MAME)
 //    $005F8000-$005F800F  MC6840 PTM (ptm6840.sv), IRQ 6
@@ -85,6 +86,17 @@ module hp385_top
 	input      [15:0] sd_buff_dout,
 	input             sd_buff_wr,
 	output     [47:0] sd_buff_din,
+
+	// 98644 serial port
+	output            uart_txd,
+	input             uart_rxd,
+	output            uart_rts_n,
+	output            uart_dtr_n,
+	input             uart_cts_n,
+	input             uart_dsr_n,
+	input             uart_dcd_n,
+	output            uart_tx_stb,        // debug: byte written for transmission
+	output      [7:0] uart_tx_byte,
 
 	// 8042 firmware load (2 KB, 1820-4784)
 	input             hil_rom_wr,
@@ -256,7 +268,7 @@ reg         svc_write;
 reg  [31:0] svc_wdata;
 reg  [2:0]  svc_fc;
 reg         svc_card_odd;         // card ROM: odd beat takes the low half
-reg   [2:0] svc_dev;              // 8-bit device being served
+reg   [3:0] svc_dev;              // 8-bit device being served
 reg   [1:0] io_pend;              // odd lanes still to do: [1] = +1, [0] = +3
 reg  [31:0] io_rdata;
 reg         walker_armed;
@@ -293,21 +305,22 @@ localparam R_IO8  = 3'd5;   // modelled 8-bit odd-byte device (d_dev)
 localparam R_IO16 = 3'd6;   // modelled 16-bit device (d_dev)
 localparam R_VRAM = 3'd7;   // 98550A frame buffer through the Catseye
 
-localparam DEV_PTM     = 3'd0;
-localparam DEV_CATSEYE = 3'd1;   // io16
-localparam DEV_NEREID  = 3'd2;   // io16
-localparam DEV_CARD    = 3'd3;   // io8: 98550A reset/ID and interrupt register
-localparam DEV_HIL     = 3'd4;   // io8: 8042 data / command-status
-localparam DEV_HPIB    = 3'd5;   // io8: built-in HP-IB card + TMS9914
-localparam DEV_DMA     = 3'd6;   // io16: 98620C DMA
-localparam DEV_SCSI    = 3'd7;   // io16: 98265A SCSI card (SPC on the low bytes)
+localparam DEV_PTM     = 4'd0;
+localparam DEV_CATSEYE = 4'd1;   // io16
+localparam DEV_NEREID  = 4'd2;   // io16
+localparam DEV_CARD    = 4'd3;   // io8: 98550A reset/ID and interrupt register
+localparam DEV_HIL     = 4'd4;   // io8: 8042 data / command-status
+localparam DEV_HPIB    = 4'd5;   // io8: built-in HP-IB card + TMS9914
+localparam DEV_DMA     = 4'd6;   // io16: 98620C DMA
+localparam DEV_SCSI    = 4'd7;   // io16: 98265A SCSI card (SPC on the low bytes)
+localparam DEV_SERIAL  = 4'd8;   // io16: 98644 serial card (8250 on the low bytes)
 
 
 reg  [2:0]  d_region;
 reg  [1:0]  d_sel;
 reg  [31:2] d_maddr;
 reg  [31:0] d_stub;
-reg   [2:0] d_dev;
+reg   [3:0] d_dev;
 
 always @(*) begin
 	d_region = R_BERR;
@@ -331,6 +344,9 @@ always @(*) begin
 	end
 	else if (s_la[31:12] == 20'h00500 && s_la[11:0] < 12'h210) begin   // 98620C DMA
 		d_region = R_IO16; d_dev = DEV_DMA;
+	end
+	else if (s_la[31:6] == 26'h001A400) begin  // 98644 serial, sc 9 ($690000-$69003F)
+		d_region = R_IO16; d_dev = DEV_SERIAL;
 	end
 	else if (s_la[31:16] == 16'h006E && s_la[15:11] == 5'd0) begin   // 98265A, sc 14
 		d_region = R_IO16; d_dev = DEV_SCSI;
@@ -464,10 +480,35 @@ wire  [1:0] io16_be    = io_pend[1] ? svc_be[3:2] : svc_be[1:0];
 wire [15:0] io16_wdata = io_pend[1] ? svc_wdata[31:16] : svc_wdata[15:0];
 wire [15:0] cats_dout, ner_dout;
 wire [15:0] dma_dout;
-wire [15:0] scsi_dout;
+wire [15:0] scsi_dout, ser_dout;
 wire [15:0] io16_rdata = (svc_dev == DEV_NEREID) ? ner_dout :
                          (svc_dev == DEV_DMA)    ? dma_dout :
-                         (svc_dev == DEV_SCSI)   ? scsi_dout : cats_dout;
+                         (svc_dev == DEV_SCSI)   ? scsi_dout :
+                         (svc_dev == DEV_SERIAL) ? ser_dout : cats_dout;
+
+// 98644 serial (select code 9)
+wire        ser_irq;
+hp98644 serial (
+	.clk(clk),
+	.reset(dio_reset),
+	.reg_cs(io16_cs && svc_dev == DEV_SERIAL),
+	.reg_we(svc_write),
+	.reg_off(io16_addr[5:1]),
+	.reg_be(io16_be),
+	.reg_din(io16_wdata),
+	.reg_dout(ser_dout),
+	.irq(ser_irq),
+	.txd(uart_txd),
+	.rxd(uart_rxd),
+	.rts_n(uart_rts_n),
+	.dtr_n(uart_dtr_n),
+	.cts_n(uart_cts_n),
+	.dsr_n(uart_dsr_n),
+	.dcd_n(uart_dcd_n),
+	.ri_n(1'b1),
+	.tx_stb(uart_tx_stb),
+	.tx_byte(uart_tx_byte)
+);
 
 // 98620C DMA: a bus master next to the CPU and the table walker
 wire  [7:1] dma_irq;
@@ -584,7 +625,7 @@ nereid nereid (
 // Interrupts: all autovectored; IPL is the highest pending level
 //----------------------------------------------------------------------------
 wire        gfx_int = card_intreg[7] && gfx_irq;
-wire  [7:1] irq_lvl = {hil_nmi, ptm_irq, 1'b0, scsi_irq, hpib_irq, 1'b0, hil_irq1} | dma_irq |
+wire  [7:1] irq_lvl = {hil_nmi, ptm_irq, ser_irq, scsi_irq, hpib_irq, 1'b0, hil_irq1} | dma_irq |
                       ((gfx_int ? 7'b0000001 : 7'b0) << (card_intreg[5:3] - 3'd1));
 always @(posedge clk)
 	if (reset) ipl_n <= 3'd7;
