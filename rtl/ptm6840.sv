@@ -90,6 +90,7 @@ always @(*) begin
 end
 
 integer i;
+reg [2:0] tmo;                        // timers timing out this clock (blocking temp)
 
 always @(posedge clk) begin
 	if (reset) begin
@@ -102,6 +103,7 @@ always @(posedge clk) begin
 		msb_buf <= 0; lsb_buf <= 0; t3_pre <= 0;
 	end
 	else begin
+		tmo = 3'b000;
 		if (src_tick[2] && !held) t3_pre <= t3_pre + 1'd1;
 
 		// ---- counting ----
@@ -117,7 +119,7 @@ always @(posedge clk) begin
 						if (count[i][15:8] == 8'd0) begin
 							count[i] <= latch[i];
 							o[i]     <= 1'b0;
-							flag[i]  <= 1'b1; flag_seen[i] <= 1'b0;
+							flag[i]  <= 1'b1; flag_seen[i] <= 1'b0; tmo[i] = 1'b1;
 						end
 						else begin
 							count[i] <= {count[i][15:8] - 8'd1, latch[i][7:0]};
@@ -131,7 +133,7 @@ always @(posedge clk) begin
 					// 16-bit: time-out after latch+1 clocks
 					if (count[i] == 16'd0) begin
 						count[i] <= latch[i];
-						flag[i]  <= 1'b1; flag_seen[i] <= 1'b0;
+						flag[i]  <= 1'b1; flag_seen[i] <= 1'b0; tmo[i] = 1'b1;
 						if (ctrl[i][5] && !ctrl[i][3]) o[i] <= 1'b0;   // single-shot ends
 						else                           o[i] <= !o[i];
 						armed[i] <= 1'b0;
@@ -175,7 +177,8 @@ always @(posedge clk) begin
 			3'd2, 3'd4, 3'd6: begin
 				lsb_buf <= count[rs[2:1] - 2'd1][7:0];
 				// status read with the flag set, then counter read: clear
-				if (flag_seen[rs[2:1] - 2'd1]) begin
+				// (not a time-out happening in this same clock)
+				if (flag_seen[rs[2:1] - 2'd1] && !tmo[rs[2:1] - 2'd1]) begin
 					flag[rs[2:1] - 2'd1]      <= 1'b0;
 					flag_seen[rs[2:1] - 2'd1] <= 1'b0;
 				end
