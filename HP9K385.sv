@@ -188,7 +188,7 @@ reg         ld_req;
 reg  [26:2] ld_addr;
 reg   [3:0] ld_be;
 reg  [31:0] ld_wdata;
-wire        sd_ack;
+wire        sdr_ack;                  // SDRAM beat acknowledge
 
 // 8042 firmware: straight into its block RAM, a byte per clock
 reg         hil_wr;
@@ -201,7 +201,7 @@ always @(posedge clk_sys) begin
 	if (hil_second) begin
 		hil_wr <= 1'b1; hil_addr <= hil_addr + 11'd1; hil_data <= hil_hi; hil_second <= 1'b0;
 	end
-	if (ld_req && sd_ack) begin
+	if (ld_req && sdr_ack) begin
 		ld_req     <= 1'b0;
 		ioctl_wait <= 1'b0;
 	end
@@ -231,7 +231,7 @@ wire  [1:0] mem_sel;
 wire [31:2] mem_addr;
 wire  [3:0] mem_be;
 wire [31:0] mem_wdata;
-wire [31:0] sd_rdata;
+wire [31:0] sdr_rdata;
 
 wire        vram_req, vram_we, vram_ack;
 wire [21:2] vram_addr;
@@ -275,8 +275,8 @@ hp385_top machine
 	.mem_addr(mem_addr),
 	.mem_be(mem_be),
 	.mem_wdata(mem_wdata),
-	.mem_ack(sd_ack && !ld_req),
-	.mem_rdata(sd_rdata),
+	.mem_ack(sdr_ack && !ld_req),
+	.mem_rdata(sdr_rdata),
 
 	.leds(leds),
 
@@ -349,8 +349,8 @@ sdram_beat32 sdram
 	.addr(ld_req ? ld_addr : m_sd_addr),
 	.be(ld_req ? ld_be : mem_be),
 	.wdata(ld_req ? ld_wdata : mem_wdata),
-	.ack(sd_ack),
-	.rdata(sd_rdata),
+	.ack(sdr_ack),
+	.rdata(sdr_rdata),
 	.busy(),
 	.line_valid_o(),
 	.line_tag_o(),
