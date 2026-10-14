@@ -104,9 +104,47 @@ Modelled since the Phase 0 run above:
 - **The RESET instruction must not reset the DIO cards.** The boot ROM executes RESET about 0.1 s after power-up, while the 8042 is still configuring the HIL loop. A reset at that point warm-starts the 8042 with the loop configuration half done, so no keyboard is found.
 - **The Catseye's full-screen clears are slow** with the sim's 2-clock VRAM port: about 2.3M clocks for a 1280×1024 clear. The CPU waits behind them. Use `--loop-window 10000000` (or 0) so the stall detector doesn't fire.
 
+## Phase 2 progress: booting from SCSI (2026-10-14, evening)
+
+**Added:**
+
+- 98620C DMA.
+- 98265A SCSI at select code 14:
+  - MB87030 SPC.
+  - Disks on IDs 0 and 1.
+  - CD-ROM on ID 2.
+- 98644 serial at select code 9.
+- HIL mouse.
+- MSM58321 RTC.
+- SN76494 beeper.
+
+The console now also lists "DMA-C0" and "HP98265 (SCSI S 32) at 14".
+
+**Boot test:**
+
+```
+tools/bootblk/build.sh                         # build/hp385_testboot.img (LIF, SYSTEST)
+cd verilator && ./obj_dir/Vhp385_top --rom out/bootrom_fast.bin \
+    --card-rom ../scratch/roms/dio98550/98550a.bin --hil-rom ../scratch/roms/human_interface/1820-4784.bin \
+    --disk0 ../build/hp385_testboot.img --cycles 200000000 --stop-pc FFF00072 --snap out/screen.ppm
+```
+
+- The ROM scans SCSI IDs 6..0. Each empty ID costs a 250 ms selection timeout, so ID 0 comes up around 108M clocks.
+- It then reads the LIF volume, lists "1S SYSTEST" and auto-boots it.
+- The test program loads through a multi-block DMA read, prints two lines through the ROM's console entry `$150`, draws VRAM bars and sets the LEDs.
+- The boot protocol is documented in `docs/reference/lif_boot.md`.
+
+**Bugs found on the way:**
+
+- **98620 DMA count:** it must end at −1 (as in MAME). The ROM compares it with the SPC residue.
+- **UART:** an LSR read in the same clock as a received error lost the error.
+- **PTM:** a time-out in the same clock as a flag clear was lost.
+
+**Open (low confidence):** in the ROM's SCSI error-recovery path, "Set ATN" while connected does not raise ATN. That matches MAME's MB87030, so it needs the datasheet. Normal boots don't use this path.
+
 ## Next gaps, in boot order
 
 1. ~~VRAM, Catseye and Nereid~~, ~~8042 + HIL keyboard~~ and ~~HP-IB self-test~~: done.
-2. **Boot devices:** 98620 DMA and 98265A SCSI (Phase 2), so the system search finds something to boot.
+2. ~~**Boot devices:** 98620 DMA and 98265A SCSI~~: done; a LIF test system boots from SCSI. Next: real software (NetBSD/hp300, BASIC/WS, HP-UX), which needs disk images; ask before downloading.
 3. **MiSTer shell:** PLL, SDRAM for RAM and ROM, DDR3 for VRAM and scanout, loaders. Then a first Quartus fit.
-4. **Smaller items:** HIL mouse, MSM58321 RTC, SN76494 beeper, 98644 serial.
+4. ~~**Smaller items:** HIL mouse, MSM58321 RTC, SN76494 beeper, 98644 serial~~: done. Still to do: the config EEPROM at `$400000`, Catseye line drawing and bit mode (for X11), and LAN.
