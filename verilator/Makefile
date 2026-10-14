@@ -30,6 +30,9 @@ V_SRC = \
 	$(RTL)/sn76494.sv \
 	$(RTL)/hpib.sv \
 	$(RTL)/hp98620.sv \
+	$(RTL)/hp98265a.sv \
+	$(RTL)/scsi/mb87030.sv \
+	$(RTL)/scsi/scsi_disk.sv \
 	$(RTL)/wombat/wombat_cpu.sv \
 	$(RTL)/wombat/wombat_store_buffer.sv \
 	$(RTL)/wombat/wombat_bus32.sv \

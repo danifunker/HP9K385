@@ -16,6 +16,7 @@
 //                         reset/ID $560001, interrupt reg $560003,
 //                         Catseye regs $564000 (catseye.sv), Nereid $566000
 //    $00500000-$0050020F  98620C DMA (hp98620.sv), interrupt level programmable
+//    $006E0000-$006E07FF  98265A SCSI, select code 14 (hp98265a.sv), IRQ 4
 //    $005F4000-$005F400F  system-control registers (16 bytes of RAM, as MAME)
 //    $005F8000-$005F800F  MC6840 PTM (ptm6840.sv), IRQ 6
 //    top N MB below $FFFFFFFF  main RAM (mem port, sel 1), N from ram_mask
@@ -70,6 +71,19 @@ module hp385_top
 	input signed [8:0] hil_mouse_dx,     // right positive
 	input signed [8:0] hil_mouse_dy,     // up positive
 	input       [2:0] hil_mouse_btn,     // {middle, right, left}
+
+	// SCSI disks, IDs 0 and 1 (MiSTer hps_io block interface, WIDE)
+	input       [1:0] img_mounted,
+	input      [63:0] img_size,
+	input             img_readonly,
+	output     [63:0] sd_lba,             // {disk 1, disk 0}
+	output      [1:0] sd_rd,
+	output      [1:0] sd_wr,
+	input       [1:0] sd_ack,
+	input       [7:0] sd_buff_addr,
+	input      [15:0] sd_buff_dout,
+	input             sd_buff_wr,
+	output     [31:0] sd_buff_din,        // {disk 1, disk 0}
 
 	// 8042 firmware load (2 KB, 1820-4784)
 	input             hil_rom_wr,
@@ -285,6 +299,7 @@ localparam DEV_CARD    = 3'd3;   // io8: 98550A reset/ID and interrupt register
 localparam DEV_HIL     = 3'd4;   // io8: 8042 data / command-status
 localparam DEV_HPIB    = 3'd5;   // io8: built-in HP-IB card + TMS9914
 localparam DEV_DMA     = 3'd6;   // io16: 98620C DMA
+localparam DEV_SCSI    = 3'd7;   // io16: 98265A SCSI card (SPC on the low bytes)
 
 
 reg  [2:0]  d_region;
@@ -315,6 +330,9 @@ always @(*) begin
 	end
 	else if (s_la[31:12] == 20'h00500 && s_la[11:0] < 12'h210) begin   // 98620C DMA
 		d_region = R_IO16; d_dev = DEV_DMA;
+	end
+	else if (s_la[31:16] == 16'h006E && s_la[15:11] == 5'd0) begin   // 98265A, sc 14
+		d_region = R_IO16; d_dev = DEV_SCSI;
 	end
 	else if (s_la[31:16] == 16'h0042) begin    // 8042 (mirrored)
 		d_region = R_IO8; d_dev = DEV_HIL;
@@ -445,15 +463,47 @@ wire  [1:0] io16_be    = io_pend[1] ? svc_be[3:2] : svc_be[1:0];
 wire [15:0] io16_wdata = io_pend[1] ? svc_wdata[31:16] : svc_wdata[15:0];
 wire [15:0] cats_dout, ner_dout;
 wire [15:0] dma_dout;
+wire [15:0] scsi_dout;
 wire [15:0] io16_rdata = (svc_dev == DEV_NEREID) ? ner_dout :
-                         (svc_dev == DEV_DMA)    ? dma_dout : cats_dout;
+                         (svc_dev == DEV_DMA)    ? dma_dout :
+                         (svc_dev == DEV_SCSI)   ? scsi_dout : cats_dout;
 
 // 98620C DMA: a bus master next to the CPU and the table walker
 wire  [7:1] dma_irq;
-wire  [1:0] dma_dmar = 2'b00;      // no requesting card yet
+wire  [1:0] dma_dmar;              // the SCSI card is the only requester
 wire        dma_dack_rd, dma_dack_wr, dma_dack_ch;
 wire  [7:0] dma_dack_wdata;
-wire  [7:0] dma_dack_rdata = 8'hFF;
+wire  [7:0] dma_dack_rdata;
+wire        scsi_irq;
+
+hp98265a scsi (
+	.clk(clk),
+	.reset(dio_reset),
+	.reg_cs(io16_cs && svc_dev == DEV_SCSI),
+	.reg_we(svc_write),
+	.reg_off(io16_addr[10:1]),
+	.reg_be(io16_be),
+	.reg_din(io16_wdata),
+	.reg_dout(scsi_dout),
+	.irq(scsi_irq),
+	.dmar(dma_dmar),
+	.dack_rd(dma_dack_rd),
+	.dack_wr(dma_dack_wr),
+	.dack_ch(dma_dack_ch),
+	.dack_wdata(dma_dack_wdata),
+	.dack_rdata(dma_dack_rdata),
+	.img_mounted(img_mounted),
+	.img_size(img_size),
+	.img_readonly(img_readonly),
+	.sd_lba(sd_lba),
+	.sd_rd(sd_rd),
+	.sd_wr(sd_wr),
+	.sd_ack(sd_ack),
+	.sd_buff_addr(sd_buff_addr),
+	.sd_buff_dout(sd_buff_dout),
+	.sd_buff_wr(sd_buff_wr),
+	.sd_buff_din(sd_buff_din)
+);
 
 hp98620 dma (
 	.clk(clk),
@@ -533,7 +583,7 @@ nereid nereid (
 // Interrupts: all autovectored; IPL is the highest pending level
 //----------------------------------------------------------------------------
 wire        gfx_int = card_intreg[7] && gfx_irq;
-wire  [7:1] irq_lvl = {hil_nmi, ptm_irq, 2'b00, hpib_irq, 1'b0, hil_irq1} | dma_irq |
+wire  [7:1] irq_lvl = {hil_nmi, ptm_irq, 1'b0, scsi_irq, hpib_irq, 1'b0, hil_irq1} | dma_irq |
                       ((gfx_int ? 7'b0000001 : 7'b0) << (card_intreg[5:3] - 3'd1));
 always @(posedge clk)
 	if (reset) ipl_n <= 3'd7;

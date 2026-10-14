@@ -13,6 +13,7 @@
 //   --hil-rom FILE     8042 firmware 1820-4784 (2 KB); absent = the 8042 runs NOPs
 //   --hil-trace FILE   one line per 8042 instruction: cycle pc a
 //   --mlc-trace FILE   HIL link controller writes, reads and loop frames
+//   --disk0 FILE / --disk1 FILE   SCSI disk images (IDs 0 / 1); writes go back to the file
 //   --key CYC:CODE     at clock CYC send HIL keycode CODE (hex; bit 0 = release); repeatable
 //   --ram-mb N         main RAM size, power of two, 1..128 (default 8)
 //   --cycles N         stop after N clocks (default 50,000,000)
@@ -124,6 +125,69 @@ static void vram_service() {
 	top->vram_ack = 1;
 }
 
+// ---- SCSI disks: hps_io block protocol (WIDE: 16-bit words, [7:0] first) ----
+struct Disk {
+	FILE *f = nullptr;
+	uint64_t size = 0;
+};
+static Disk disks[2];
+static int blk_disk = -1;            // disk being served
+static int blk_phase = 0;            // 0 idle, 1 latency, 2 streaming, 3 done
+static int blk_wait = 0, blk_word = 0;
+static bool blk_write = false;
+static uint8_t blk_buf[512];
+
+static void disk_service() {
+	top->sd_buff_wr = 0;
+	switch (blk_phase) {
+	case 0:
+		for (int d = 0; d < 2; d++) {
+			bool rd = (top->sd_rd >> d) & 1, wr = (top->sd_wr >> d) & 1;
+			if (!rd && !wr) continue;
+			blk_disk = d; blk_write = wr; blk_wait = 64; blk_phase = 1; blk_word = 0;
+			uint32_t lba = d ? (uint32_t)(top->sd_lba >> 32) : (uint32_t)top->sd_lba;
+			memset(blk_buf, 0, 512);
+			if (disks[d].f) {
+				fseeko(disks[d].f, (off_t)lba * 512, SEEK_SET);
+				if (!wr && fread(blk_buf, 1, 512, disks[d].f) != 512) { /* past the end: zeros */ }
+				if (wr) fseeko(disks[d].f, (off_t)lba * 512, SEEK_SET);
+			}
+			break;
+		}
+		break;
+	case 1:
+		if (--blk_wait == 0) { top->sd_ack = 1 << blk_disk; blk_phase = 2; }
+		break;
+	case 2:
+		if (!blk_write) {
+			top->sd_buff_addr = blk_word;
+			top->sd_buff_dout = blk_buf[2 * blk_word] | (blk_buf[2 * blk_word + 1] << 8);
+			top->sd_buff_wr = 1;
+			if (++blk_word == 256) blk_phase = 3;
+		} else {
+			// address now, sample the word on the next call
+			if (blk_word > 0) {
+				uint16_t w = (uint16_t)(blk_disk ? (top->sd_buff_din >> 16) : top->sd_buff_din);
+				blk_buf[2 * (blk_word - 1)] = w & 0xFF; blk_buf[2 * (blk_word - 1) + 1] = w >> 8;
+			}
+			if (blk_word == 256) {
+				if (disks[blk_disk].f) { fwrite(blk_buf, 1, 512, disks[blk_disk].f); fflush(disks[blk_disk].f); }
+				blk_phase = 3;
+			} else top->sd_buff_addr = blk_word;
+			blk_word++;
+		}
+		break;
+	case 3:
+		top->sd_ack = 0;
+		blk_phase = 4;
+		break;
+	case 4:
+		// the request has to drop before the next one is taken
+		if (!(((top->sd_rd | top->sd_wr) >> blk_disk) & 1)) blk_phase = 0;
+		break;
+	}
+}
+
 // Screen as the 98550A shows it: display-enabled planes through the Nereid
 static void snapshot(const char *path) {
 	FILE *f = fopen(path, "wb");
@@ -171,6 +235,7 @@ int main(int argc, char **argv) {
 	const char *rom_path = nullptr, *card_path = nullptr, *log_path = nullptr;
 	const char *pct_path = nullptr, *fst_path = nullptr, *snap_path = nullptr;
 	const char *hil_path = nullptr, *hilt_path = nullptr, *mlct_path = nullptr;
+	const char *disk_path[2] = {nullptr, nullptr};
 	uint64_t snap_every = 0;
 	bool rom_le = false;
 	unsigned ram_mb = 8;
@@ -192,6 +257,8 @@ int main(int argc, char **argv) {
 		else if (a == "--hil-rom") hil_path = next();
 		else if (a == "--hil-trace") hilt_path = next();
 		else if (a == "--mlc-trace") mlct_path = next();
+		else if (a == "--disk0") disk_path[0] = next();
+		else if (a == "--disk1") disk_path[1] = next();
 		else if (a == "--ram-mb") ram_mb = strtoul(next(), nullptr, 0);
 		else if (a == "--cycles") max_cycles = strtoull(next(), nullptr, 0);
 		else if (a == "--log") log_path = next();
@@ -233,6 +300,15 @@ int main(int argc, char **argv) {
 	ram.assign((size_t)ram_mb << 20, 0);
 	ram_base = (uint32_t)(0x100000000ull - ((uint64_t)ram_mb << 20));
 	unsigned lg = __builtin_ctz(ram_mb);
+
+	for (int d = 0; d < 2; d++) {
+		if (!disk_path[d]) continue;
+		disks[d].f = fopen(disk_path[d], "r+b");
+		if (!disks[d].f) { perror(disk_path[d]); return 1; }
+		fseeko(disks[d].f, 0, SEEK_END);
+		disks[d].size = ftello(disks[d].f);
+		printf("[SIM] SCSI %d: %s, %llu bytes\n", d, disk_path[d], (unsigned long long)disks[d].size);
+	}
 
 	FILE *log = log_path ? fopen(log_path, "w") : stdout;
 	FILE *pct = pct_path ? fopen(pct_path, "w") : nullptr;
@@ -284,6 +360,10 @@ int main(int argc, char **argv) {
 		} else top->hil_rom_wr = 0;
 		if (cycle == reset_clks) top->reset = 0;
 		if (cycle == reset_clks + 16) top->rtc_set[2] = 1;     // bit 64: "RTC updated"
+		// mount the images: a one-clock pulse per disk with its size
+		top->img_mounted = 0;
+		for (int d = 0; d < 2; d++)
+			if (disks[d].f && cycle == reset_clks + 20 + d) { top->img_mounted = 1 << d; top->img_size = disks[d].size; }
 		top->hil_key_stb = 0;
 		for (auto &k : keys)
 			if (k.first == cycle) {
@@ -294,6 +374,7 @@ int main(int argc, char **argv) {
 		top->eval();
 		mem_service();       // sample the outputs of this edge, answer for the next
 		vram_service();
+		disk_service();
 		top->eval();
 		if (fst && cycle >= fst_start && cycle < fst_start + fst_cycles) fst->dump(cycle * 2);
 		top->clk = 0;
