@@ -94,7 +94,7 @@ static void mem_service() {
 	top->mem_ack = 1;
 }
 
-static const char *kind_name[] = {"BERR", "STUB", "SYS ", "LED ", "ROMW", "?", "?", "?"};
+static const char *kind_name[] = {"BERR", "STUB", "SYS ", "LED ", "ROMW", "IO8 ", "?", "?"};
 
 static const char *region_name(uint32_t a) {
 	if (a < 0x20000) return "bootrom";
@@ -105,6 +105,7 @@ static const char *region_name(uint32_t a) {
 	if ((a >> 16) == 0x56) return "98550";
 	if ((a >> 4) == 0x005F400) return "sysregs";
 	if ((a >> 4) == 0x005F800) return "ptm";
+	if (a == 0x0041C000 || (a >> 12) == 0x41C) return "frodo(4xx)";
 	if (a >= 0x00600000 && a < 0x01000000) {
 		static char buf[32];
 		snprintf(buf, sizeof buf, "dio-sc%u", (a - 0x00600000) >> 16);
@@ -190,7 +191,8 @@ int main(int argc, char **argv) {
 	uint64_t pct_lines = 0, dispatches = 0;
 	uint32_t win_lo = 0xFFFFFFFF, win_hi = 0, prev_lo = 1, prev_hi = 0;
 	uint64_t win_events = 0, prev_events = 1, win_dispatches = 0;
-	uint32_t last_ev_addr = 0xFFFFFFFF; uint8_t last_ev_kind = 0xFF; uint64_t ev_repeat = 0;
+	uint32_t last_ev_addr = 0xFFFFFFFF; uint8_t last_ev_kind = 0xFF, last_ev_be = 0; bool last_ev_wr = false;
+	uint64_t ev_repeat = 0;
 	int exc_report = -1;      // clocks until the pending exception is logged
 	const char *stop_reason = "cycle limit";
 
@@ -234,12 +236,13 @@ int main(int argc, char **argv) {
 		if (top->ev_stb) {
 			win_events++;
 			uint32_t a = top->ev_addr;
-			if (a == last_ev_addr && top->ev_kind == last_ev_kind && top->ev_kind != 3) {
+			if (a == last_ev_addr && top->ev_kind == last_ev_kind && top->ev_be == last_ev_be &&
+			    top->ev_write == last_ev_wr && top->ev_kind != 3) {
 				ev_repeat++;
 			} else {
 				if (ev_repeat) fprintf(log, "%12s      (previous line repeated %llu more times)\n", "", (unsigned long long)ev_repeat);
 				ev_repeat = 0;
-				last_ev_addr = a; last_ev_kind = top->ev_kind;
+				last_ev_addr = a; last_ev_kind = top->ev_kind; last_ev_be = top->ev_be; last_ev_wr = top->ev_write;
 				fprintf(log, "%12llu %s %c %08X be=%X data=%08X fc=%u%s pc=%08X %s\n",
 				        (unsigned long long)cycle, kind_name[top->ev_kind & 7], top->ev_write ? 'W' : 'R',
 				        a, top->ev_be, top->ev_data, top->ev_fc, top->ev_walker ? " walker" : "",

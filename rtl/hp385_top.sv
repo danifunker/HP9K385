@@ -14,7 +14,7 @@
 //    $00560000-$0056FFFF  98550A: card ROM on odd bytes (mem port, sel 2),
 //                         Catseye regs $564000, Nereid $566000 (stub)
 //    $005F4000-$005F400F  system-control registers (16 bytes of RAM, as MAME)
-//    $005F8000-$005F800F  MC6840 PTM                   (stub)
+//    $005F8000-$005F800F  MC6840 PTM (ptm6840.sv), IRQ 6
 //    top N MB below $FFFFFFFF  main RAM (mem port, sel 1), N from ram_mask
 //
 //  Memory port contract (same shape as wombat_bus32's beat side):
@@ -25,6 +25,11 @@
 //
 //  The trace port pulses ev_stb for every bus error, stub-device access,
 //  system-register access and LED write, so the sim can log the probe order.
+//  8-bit devices sit on the odd bytes (D7:0 of each 16-bit word, so lanes 2
+//  and 0 of a longword beat).  A beat is served one odd lane at a time
+//  through the io8_* strobe, so a longword or MOVEP access to them behaves
+//  like the 030's dynamic bus sizing would have; even lanes read 0xFF.
+//
 //  ce must be 1 for now (the decoder is not ce-gated).
 //============================================================================
 
@@ -67,6 +72,7 @@ localparam EV_STUB = 3'd1;
 localparam EV_SYS  = 3'd2;
 localparam EV_LED  = 3'd3;
 localparam EV_ROMW = 3'd4;   // write to boot ROM space other than the LEDs
+localparam EV_IO8  = 3'd5;   // modelled 8-bit device access (data = result)
 
 wire nreset = !reset;
 
@@ -88,13 +94,14 @@ reg         walker_berr;
 
 reg         cpu_berr;
 wire        nresetout;
+reg   [2:0] ipl_n;                // active low, from the priority encoder
 
 wombat_cpu cpu (
 	.clk(clk),
 	.nreset(nreset),
 	.ce(ce),
 
-	.ipl(3'b111),                 // no interrupt sources yet
+	.ipl(ipl_n),
 	.ipl_autovector(1'b1),
 	.berr(cpu_berr),
 	.stall_hold(1'b0),
@@ -174,6 +181,7 @@ wombat_bus32 bus32 (
 // Bus service state; walker requests take precedence over the CPU beat
 localparam S_IDLE = 2'd0;
 localparam S_MEM  = 2'd1;
+localparam S_IO8  = 2'd2;
 
 reg  [1:0]  svc;
 reg         svc_walker;
@@ -183,6 +191,9 @@ reg         svc_write;
 reg  [31:0] svc_wdata;
 reg  [2:0]  svc_fc;
 reg         svc_card_odd;         // card ROM: odd beat takes the low half
+reg   [1:0] svc_dev;              // 8-bit device being served
+reg   [1:0] io_pend;              // odd lanes still to do: [1] = +1, [0] = +3
+reg  [31:0] io_rdata;
 reg         walker_armed;
 wire        walker_pend = walker_req && walker_armed;
 
@@ -202,6 +213,9 @@ localparam R_MEM  = 3'd1;   // mem port: ROM/RAM/card ROM
 localparam R_SYS  = 3'd2;   // $5F4000 registers
 localparam R_STUB = 3'd3;   // idle device stub
 localparam R_ROMW = 3'd4;   // write into boot ROM space (LED latch at $1FFFC)
+localparam R_IO8  = 3'd5;   // modelled 8-bit odd-byte device (d_dev)
+
+localparam DEV_PTM = 2'd0;
 
 function [31:0] stub_rdata;   // idle read value of a stub device longword
 	input [31:2] a;
@@ -227,12 +241,14 @@ reg  [2:0]  d_region;
 reg  [1:0]  d_sel;
 reg  [31:2] d_maddr;
 reg  [31:0] d_stub;
+reg   [1:0] d_dev;
 
 always @(*) begin
 	d_region = R_BERR;
 	d_sel    = 2'd0;
 	d_maddr  = s_addr;
 	d_stub   = stub_rdata(s_addr);
+	d_dev    = DEV_PTM;
 	if (s_la[31:17] == 15'd0) begin
 		if (s_write) d_region = R_ROMW;
 		else begin d_region = R_MEM; d_sel = 2'd0; end
@@ -242,8 +258,9 @@ always @(*) begin
 	end
 	else if (s_la[31:4] == 28'h005F400)
 		d_region = R_SYS;
-	else if (s_la[31:4] == 28'h005F800)        // MC6840 PTM
-		d_region = R_STUB;
+	else if (s_la[31:4] == 28'h005F800) begin  // MC6840 PTM
+		d_region = R_IO8; d_dev = DEV_PTM;
+	end
 	else if (s_la[31:16] == 16'h0042)          // 8042
 		d_region = R_STUB;
 	else if (s_la[31:16] == 16'h0047)          // HP-IB
@@ -264,6 +281,40 @@ always @(*) begin
 			d_region = R_STUB;
 	end
 end
+
+//----------------------------------------------------------------------------
+// 8-bit odd-byte devices
+//----------------------------------------------------------------------------
+wire        io8_cs    = (svc == S_IO8) && (|io_pend);
+wire        io8_we    = svc_write;
+wire [31:0] io8_addr  = {svc_addr, io_pend[1] ? 2'd1 : 2'd3};
+wire  [7:0] io8_wdata = io_pend[1] ? svc_wdata[23:16] : svc_wdata[7:0];
+wire  [7:0] ptm_dout;
+wire        ptm_irq;
+
+ptm6840 ptm (
+	.clk(clk),
+	.reset(reset),
+	.cs(io8_cs && svc_dev == DEV_PTM),
+	.we(io8_we),
+	.rs(io8_addr[3:1]),
+	.din(io8_wdata),
+	.dout(ptm_dout),
+	.irq(ptm_irq),
+	.out()
+);
+
+wire  [7:0] io8_rdata = ptm_dout;
+
+//----------------------------------------------------------------------------
+// Interrupts: all autovectored; IPL is the highest pending level
+//----------------------------------------------------------------------------
+wire  [7:1] irq_lvl = {1'b0, ptm_irq, 5'b00000};
+always @(posedge clk)
+	if (reset) ipl_n <= 3'd7;
+	else ipl_n <= irq_lvl[7] ? 3'd0 : irq_lvl[6] ? 3'd1 : irq_lvl[5] ? 3'd2 :
+	         irq_lvl[4] ? 3'd3 : irq_lvl[3] ? 3'd4 : irq_lvl[2] ? 3'd5 :
+	         irq_lvl[1] ? 3'd6 : 3'd7;
 
 //----------------------------------------------------------------------------
 // Bus service FSM
@@ -337,6 +388,17 @@ always @(posedge clk) begin
 			complete(walker_pend, sysreg[s_la[3:2]]);
 			event_log(EV_SYS, s_write ? s_wdata : sysreg[s_la[3:2]]);
 		end
+		R_IO8: begin
+			svc_dev   <= d_dev;
+			svc_addr  <= s_addr;
+			svc_be    <= s_be;
+			svc_write <= s_write;
+			svc_wdata <= s_wdata;
+			svc_fc    <= walker_pend ? 3'd5 : bus_fc;
+			io_pend   <= {s_be[2], s_be[0]};
+			io_rdata  <= 32'hFFFF_FFFF;
+			svc       <= S_IO8;
+		end
 		R_STUB: begin
 			complete(walker_pend, d_stub);
 			event_log(EV_STUB, s_write ? s_wdata : d_stub);
@@ -369,6 +431,28 @@ always @(posedge clk) begin
 			                                 : {8'hFF, mem_rdata[31:24], 8'hFF, mem_rdata[23:16]});
 		else
 			complete(svc_walker, mem_rdata);
+	end
+	S_IO8: begin
+		if (io_pend[1]) begin
+			io_rdata[23:16] <= io8_rdata;
+			io_pend[1]      <= 1'b0;
+		end
+		else if (io_pend[0]) begin
+			io_rdata[7:0]   <= io8_rdata;
+			io_pend[0]      <= 1'b0;
+		end
+		else begin
+			complete(svc_walker, io_rdata);
+			ev_stb    <= 1;
+			ev_kind   <= EV_IO8;
+			ev_addr   <= {svc_addr, 2'b00};
+			ev_be     <= svc_be;
+			ev_write  <= svc_write;
+			ev_data   <= svc_write ? svc_wdata : io_rdata;
+			ev_fc     <= svc_fc;
+			ev_walker <= svc_walker;
+			svc       <= S_IDLE;
+		end
 	end
 	default: svc <= S_IDLE;
 	endcase

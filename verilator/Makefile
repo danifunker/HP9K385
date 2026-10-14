@@ -16,6 +16,7 @@ RUNARGS  ?=
 V_SRC = \
 	hp385.vlt \
 	$(RTL)/hp385_top.sv \
+	$(RTL)/ptm6840.sv \
 	$(RTL)/wombat/wombat_cpu.sv \
 	$(RTL)/wombat/wombat_store_buffer.sv \
 	$(RTL)/wombat/wombat_bus32.sv \
