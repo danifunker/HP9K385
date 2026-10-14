@@ -13,3 +13,11 @@
 The port drives the new `post_window` input with the Quadra's own address decode. Its output is **byte-identical** before and after the HP9K385 refactor (checked 2026-10-14), so the refactor is neutral.
 
 Fix the bench, or replace it with one written against the current RTL, before relying on it.
+
+## Catseye
+
+| Bench | Status | Run |
+|---|---|---|
+| `tb_catseye.sv` | **passes**. Covers host writes and reads through PRR, overlapping window moves in all four directions, groups ending at the rectangle edge, clear, colour fill with per-plane rules, clipping with partial FB enable, and per-plane host rules. | `verilator --binary --timing -Wno-fatal -Wno-WIDTH --top-module tb_catseye --Mdir build/obj_tb_catseye -o tb tb/tb_catseye.sv rtl/catseye.sv && build/obj_tb_catseye/tb` |
+
+The bench was mutation-checked on 2026-10-14. A swapped rule-index order and off-by-one group-edge conditions in either direction are all caught.

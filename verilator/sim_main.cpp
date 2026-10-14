@@ -21,6 +21,8 @@
 //   --loop-window N    stall/stuck-loop detector window in clocks (default 2M; 0 off)
 //   --fst FILE         FST waveform, from --fst-start for --fst-cycles clocks
 //   --status N         print a progress line every N clocks (default 10M)
+//   --snap FILE        write the 98550A screen (1280x1024 PPM) at the end
+//   --snap-every N     ... and every N clocks
 
 #include "Vhp385_top.h"
 #include "Vhp385_top___024root.h"
@@ -35,6 +37,9 @@
 #include <vector>
 
 #define CORE(sig) (top->rootp->hp385_top__DOT__cpu__DOT__core__DOT__##sig)
+#define CATS(sig) (top->rootp->hp385_top__DOT__catseye__DOT__##sig)
+#define TOP(sig) (top->rootp->hp385_top__DOT__##sig)
+#define NEREID(sig) (top->rootp->hp385_top__DOT__nereid__DOT__##sig)
 
 static Vhp385_top *top;
 static uint64_t cycle;
@@ -42,6 +47,7 @@ static uint64_t cycle;
 static std::vector<uint8_t> rom(128 * 1024, 0xFF);
 static std::vector<uint8_t> card(32 * 1024, 0xFF);
 static std::vector<uint8_t> ram;
+static std::vector<uint8_t> vram(4 << 20, 0);   // 98550A: video bank, overlay bank
 static uint32_t ram_base;
 
 static bool load(const char *path, std::vector<uint8_t> &dst, bool swap16) {
@@ -94,7 +100,42 @@ static void mem_service() {
 	top->mem_ack = 1;
 }
 
-static const char *kind_name[] = {"BERR", "STUB", "SYS ", "LED ", "ROMW", "IO8 ", "?", "?"};
+// ---- 98550A VRAM port: same handshake as the memory port ----
+static int vram_wait = -1;
+
+static void vram_service() {
+	top->vram_ack = 0;
+	if (!top->vram_req) { vram_wait = -1; return; }
+	if (vram_wait < 0) { vram_wait = MEM_LATENCY; return; }
+	if (--vram_wait > 0) return;
+	vram_wait = -2;
+	uint32_t o = (top->vram_addr << 2) & (vram.size() - 1);
+	if (top->vram_we)
+		for (int b = 0; b < 4; b++)
+			if (top->vram_be & (8 >> b)) vram[o + b] = top->vram_wdata >> (24 - 8 * b);
+	top->vram_rdata = be32(vram, o);
+	top->vram_ack = 1;
+}
+
+// Screen as the 98550A shows it: display-enabled planes through the Nereid
+static void snapshot(const char *path) {
+	FILE *f = fopen(path, "wb");
+	if (!f) { perror(path); return; }
+	fprintf(f, "P6\n1280 1024\n255\n");
+	uint8_t de = top->display_enable, pm = NEREID(plane_mask), oc = NEREID(overlay_ctl);
+	std::vector<uint8_t> line(1280 * 3);
+	for (int y = 0; y < 1024; y++) {
+		for (int x = 0; x < 1280; x++) {
+			uint8_t v = vram[y * 2048 + x] & de, o = vram[(2 << 20) + y * 2048 + x] & de & oc;
+			uint32_t rgb = NEREID(clut)[o ? (0x100 | (o & pm)) : (v & pm)];
+			line[x * 3] = rgb >> 16; line[x * 3 + 1] = rgb >> 8; line[x * 3 + 2] = rgb;
+		}
+		fwrite(line.data(), 1, line.size(), f);
+	}
+	fclose(f);
+}
+
+static const char *kind_name[] = {"BERR", "STUB", "SYS ", "LED ", "ROMW", "IO8 ", "IO16", "?"};
 
 static const char *region_name(uint32_t a) {
 	if (a < 0x20000) return "bootrom";
@@ -102,6 +143,8 @@ static const char *region_name(uint32_t a) {
 	if ((a >> 16) == 0x42) return "8042";
 	if ((a >> 16) == 0x47) return "hpib";
 	if (a >= 0x00500000 && a < 0x00500210) return "dma";
+	if (a >= 0x00564000 && a < 0x00564900) return "catseye";
+	if (a >= 0x00566000 && a < 0x00566100) return "nereid";
 	if ((a >> 16) == 0x56) return "98550";
 	if ((a >> 4) == 0x005F400) return "sysregs";
 	if ((a >> 4) == 0x005F800) return "ptm";
@@ -119,7 +162,8 @@ static const char *region_name(uint32_t a) {
 int main(int argc, char **argv) {
 	Verilated::commandArgs(argc, argv);
 	const char *rom_path = nullptr, *card_path = nullptr, *log_path = nullptr;
-	const char *pct_path = nullptr, *fst_path = nullptr;
+	const char *pct_path = nullptr, *fst_path = nullptr, *snap_path = nullptr;
+	uint64_t snap_every = 0;
 	bool rom_le = false;
 	unsigned ram_mb = 8;
 	uint64_t max_cycles = 50000000, fst_start = 0, fst_cycles = 1000000;
@@ -147,6 +191,8 @@ int main(int argc, char **argv) {
 		else if (a == "--fst-start") fst_start = strtoull(next(), nullptr, 0);
 		else if (a == "--fst-cycles") fst_cycles = strtoull(next(), nullptr, 0);
 		else if (a == "--status") status_every = strtoull(next(), nullptr, 0);
+		else if (a == "--snap") snap_path = next();
+		else if (a == "--snap-every") snap_every = strtoull(next(), nullptr, 0);
 		else if (a == "--patch") {
 			const char *v = next();
 			const char *eq = strchr(v, '=');
@@ -193,7 +239,8 @@ int main(int argc, char **argv) {
 	uint64_t win_events = 0, prev_events = 1, win_dispatches = 0;
 	uint32_t last_ev_addr = 0xFFFFFFFF; uint8_t last_ev_kind = 0xFF, last_ev_be = 0; bool last_ev_wr = false;
 	uint64_t ev_repeat = 0;
-	int exc_report = -1;      // clocks until the pending exception is logged
+	int exc_report = -1;
+	bool gfx_warned = false;      // clocks until the pending exception is logged
 	const char *stop_reason = "cycle limit";
 
 	for (cycle = 0; cycle < max_cycles; cycle++) {
@@ -201,12 +248,20 @@ int main(int argc, char **argv) {
 		top->clk = 1;
 		top->eval();
 		mem_service();       // sample the outputs of this edge, answer for the next
+		vram_service();
 		top->eval();
 		if (fst && cycle >= fst_start && cycle < fst_start + fst_cycles) fst->dump(cycle * 2);
 		top->clk = 0;
 		top->eval();
 		if (fst && cycle >= fst_start && cycle < fst_start + fst_cycles) fst->dump(cycle * 2 + 1);
 		if (top->reset) continue;
+
+		// a port request that is never answered is a harness/protocol bug
+		static uint64_t vreq_since = 0;
+		if (!top->vram_req) vreq_since = cycle;
+		else if (cycle - vreq_since == 1000)
+			printf("[VRAM] request held 1000 clocks: addr=%06X we=%u wait=%d es=%u @%llu\n",
+			       top->vram_addr << 2, top->vram_we, vram_wait, CATS(es), (unsigned long long)cycle);
 
 		uint32_t pc = CORE(pc_i);
 
@@ -258,6 +313,13 @@ int main(int argc, char **argv) {
 
 		if (top->cpu_halted) { stop_reason = "CPU halted (double fault)"; break; }
 
+		if (top->gfx_unsupported && !gfx_warned) {
+			printf("[GFX] unsupported Catseye operation (line draw or bit mode) @%llu pc=%08X\n",
+			       (unsigned long long)cycle, pc);
+			gfx_warned = true;
+		}
+		if (snap_path && snap_every && cycle % snap_every == 0) snapshot(snap_path);
+
 		if (status_every && cycle % status_every == 0)
 			printf("[STATUS] %llu clocks, %llu dispatches, pc=%08X leds=%02X\n",
 			       (unsigned long long)cycle, (unsigned long long)dispatches, pc, top->leds);
@@ -290,6 +352,10 @@ int main(int argc, char **argv) {
 	printf("[SIM] stop: %s at %llu clocks (%.3f s at 33 MHz), %llu dispatches, pc=%08X leds=%02X\n",
 	       stop_reason, (unsigned long long)cycle, cycle / 33e6, (unsigned long long)dispatches,
 	       (uint32_t)CORE(pc_i), top->leds);
+	printf("[SIM] bus svc=%u vr_cpu_req=%u mem_req=%u vram_req=%u | catseye es=%u col=%u line=%u w=%u h=%u src=%u dst=%u\n",
+	       TOP(svc), TOP(vr_cpu_req), top->mem_req, top->vram_req, CATS(es), CATS(m_col), CATS(m_line),
+	       CATS(wm_w), CATS(wm_h), CATS(m_need_src), CATS(m_need_dst));
+	if (snap_path) { snapshot(snap_path); printf("[SIM] screen -> %s\n", snap_path); }
 	if (fst) { fst->close(); delete fst; }
 	if (pct) fclose(pct);
 	if (log != stdout) fclose(log);

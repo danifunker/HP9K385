@@ -17,6 +17,8 @@ V_SRC = \
 	hp385.vlt \
 	$(RTL)/hp385_top.sv \
 	$(RTL)/ptm6840.sv \
+	$(RTL)/catseye.sv \
+	$(RTL)/nereid.sv \
 	$(RTL)/wombat/wombat_cpu.sv \
 	$(RTL)/wombat/wombat_store_buffer.sv \
 	$(RTL)/wombat/wombat_bus32.sv \
@@ -56,7 +58,7 @@ $(EXE): $(V_SRC) $(C_SRC) Makefile
 run: $(EXE)
 	@mkdir -p out
 	$(EXE) --rom $(ROM) --card-rom $(CARDROM) --cycles $(CYCLES) \
-		--log out/events.log --pc-trace out/pc.log $(RUNARGS)
+		--log out/events.log --pc-trace out/pc.log --snap out/screen.ppm $(RUNARGS)
 
 clean:
 	rm -rf obj_dir out
