@@ -112,6 +112,8 @@ initial begin
 	for (i = 0; i < 6; i = i + 1) check("out byte", sink[i], ((16'h200 + i) & 8'hFF) ^ 8'hA5);
 	check("no irq without IE", irq_lvl, 7'b0000000);
 	rd(10'h202, st); check("address advanced", st, 16'h1206);
+	rd(10'h204, st); check("count ends at -1 (high)", st, 16'hFFFF);
+	rd(10'h206, st); check("count ends at -1 (low)", st, 16'hFFFF);
 
 	// longword units through the legacy set: 2 units = 8 bytes in
 	dev_n = 0;

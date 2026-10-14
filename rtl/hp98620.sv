@@ -136,14 +136,14 @@ task automatic count;
 	begin
 		addr[n] <= addr[n] + 32'd1;
 		if (sub[n] == 2'd0) begin
+			// the count runs down past zero: software checks it ends at -1
+			tc[n] <= tc[n] - 32'd1;
 			if (tc[n] == 32'd0) begin
 				armed[n] <= 1'b0;
 				if (ctrl[n][0]) irq[n] <= 1'b1;
 			end
-			else begin
-				tc[n]  <= tc[n] - 32'd1;
+			else
 				sub[n] <= unit_bytes_m1(ctrl[n]);
-			end
 		end
 		else sub[n] <= sub[n] - 2'd1;
 	end
