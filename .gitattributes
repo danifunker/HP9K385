@@ -1,0 +1,58 @@
+# Line-ending policy, modelled on ../MacQuadra800_MiSTer/.gitattributes.
+#
+# Text files we author are pinned to LF so a Windows build box (Quartus rewrites
+# .qsf/.qpf with CRLF on every compile) or core.autocrlf never produces
+# whole-file diffs.
+*.sv          text eol=lf
+*.qsf         text eol=lf
+*.qpf         text eol=lf
+*.sdc         text eol=lf
+*.md          text eol=lf
+
+# Executed/parsed by POSIX tools: CRLF is a hard failure, not cosmetic
+# (a CRLF `#!/bin/sh` dies under WSL/macOS/MiSTer).
+*.sh          text eol=lf
+*.py          text eol=lf
+*.tcl         text eol=lf
+Makefile      text eol=lf
+*.mk          text eol=lf
+
+# Windows batch files: keep byte-exact as committed.
+*.bat         -text
+
+# ---------------------------------------------------------------------------
+# Binaries: never convert, never diff as text. ROMs and disk images contain
+# stray CR bytes; one CRLF conversion silently corrupts them.
+*.hda         binary
+*.hdf         binary
+*.hpi         binary
+*.img         binary
+*.iso         binary
+*.chd         binary
+*.rom         binary
+*.bin         binary
+*.BIN         binary
+*.nvr         binary
+*.tgz         binary
+*.gz          binary
+*.zip         binary
+*.pdf         binary
+*.png         binary
+*.jpg         binary
+*.rbf         binary
+
+# ---------------------------------------------------------------------------
+# NOT normalized, deliberately (checked out byte-exact as committed):
+#
+#   sys/**          vendored from ../Template_MiSTer. Renormalizing would turn
+#                   every template sync into whole-file diffs.
+#   rtl/ap68040/**  vendored from ../MacQuadra800_MiSTer (AP68040 by Adam
+#                   Polkosnik). Keep byte-identical to upstream so re-syncs
+#                   diff cleanly. See rtl/ap68040/UPSTREAM.md and docs/.
+#   template demo rtl (mycore.v, lfsr.v, cos.sv) until Phase 0 replaces it.
+sys/**              -text
+rtl/ap68040/**      -text
+rtl/mycore.v        -text
+rtl/lfsr.v          -text
+rtl/cos.sv          -text
+HP9K385.srf         -text
