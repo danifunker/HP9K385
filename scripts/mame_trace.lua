@@ -21,4 +21,5 @@ table.insert(taps, tap(0x005f8000, 0x005f800f, "ptm"))
 table.insert(taps, tap(0x005f8010, 0xff7fffff, "hi"))
 if manager.machine.debugger then
   manager.machine.debugger:command("trace " .. dir .. "/mame_trace.log,maincpu,noloop")
+  manager.machine.debugger:command("trace " .. dir .. "/mame_8042.log,:sl0:human_interface:iocpu,noloop")
 end

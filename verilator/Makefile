@@ -1,6 +1,9 @@
 # HP9K385 headless full-system simulation (Verilator).
 #   make            build obj_dir/Vhp385_top
 #   make run        boot the Rev 2.0 ROM: ROM=<big-endian boot ROM> CYCLES=<n>
+#   make run-fast   same with the sim-only fast-boot ROM (no lamp-test delay,
+#                   RAM test, LED blink or checksum loop; RAM base fixed at
+#                   the 8 MB default so step 1000 does not size it)
 #   make clean
 # ROM images are never committed; by default they are read from ../scratch/roms
 # (docs/ROMS.md).  Logs land in out/ (git-ignored).
@@ -66,4 +69,12 @@ run: $(EXE)
 clean:
 	rm -rf obj_dir out
 
-.PHONY: all run clean
+FASTROM = out/bootrom_fast.bin
+$(FASTROM): $(ROM) ../docs/disasm/tools/bootrom_simpatch.py
+	@mkdir -p out
+	python3 -I ../docs/disasm/tools/bootrom_simpatch.py $(ROM) $@ --ramsize-base 0xFF800000 --be
+
+run-fast: $(FASTROM)
+	$(MAKE) run ROM=$(FASTROM)
+
+.PHONY: all run run-fast clean
