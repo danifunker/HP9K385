@@ -80,4 +80,4 @@ verilator/obj_dir/
 verilator/out/
 
 # ROM disassemblies are derived from copyrighted HP firmware: local only
-docs/disasm/
+docs/disasm/*.asm
