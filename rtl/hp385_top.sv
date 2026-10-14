@@ -15,6 +15,7 @@
 //    $00560000-$0056FFFF  98550A: card ROM on odd bytes (mem port, sel 2),
 //                         reset/ID $560001, interrupt reg $560003,
 //                         Catseye regs $564000 (catseye.sv), Nereid $566000
+//    $00500000-$0050020F  98620C DMA (hp98620.sv), interrupt level programmable
 //    $005F4000-$005F400F  system-control registers (16 bytes of RAM, as MAME)
 //    $005F8000-$005F800F  MC6840 PTM (ptm6840.sv), IRQ 6
 //    top N MB below $FFFFFFFF  main RAM (mem port, sel 1), N from ram_mask
@@ -125,6 +126,8 @@ reg         walker_berr;
 reg         cpu_berr;
 wire        nresetout;
 reg   [2:0] ipl_n;                // active low, from the priority encoder
+reg         dma_snoop;
+reg  [31:0] dma_snoop_addr;
 
 wombat_cpu cpu (
 	.clk(clk),
@@ -161,8 +164,8 @@ wombat_cpu cpu (
 	.walker_data(walker_data),
 	.walker_berr(walker_berr),
 
-	.snoop_stb(1'b0),
-	.snoop_addr(32'd0),
+	.snoop_stb(dma_snoop),
+	.snoop_addr(dma_snoop_addr),
 
 	.nresetout(nresetout),
 	.nmi_ack_toggle(),
@@ -222,7 +225,7 @@ localparam S_IO8  = 2'd2;
 localparam S_IO16 = 2'd3;
 
 reg  [1:0]  svc;
-reg         svc_walker;
+reg   [1:0] svc_src;              // who the access in service belongs to
 reg  [31:2] svc_addr;
 reg  [3:0]  svc_be;
 reg         svc_write;
@@ -234,14 +237,25 @@ reg   [1:0] io_pend;              // odd lanes still to do: [1] = +1, [0] = +3
 reg  [31:0] io_rdata;
 reg         walker_armed;
 wire        walker_pend = walker_req && walker_armed;
+// DMA requests are level-held like the walker's: armed again once dropped
+reg         dma_armed;
+wire        dma_mreq, dma_mwe;
+wire [31:0] dma_maddr;
+wire  [7:0] dma_mwdata;
+reg         dma_mack, dma_merr;
+reg  [31:0] dma_mrdata;
+wire        dma_pend = dma_mreq && dma_armed && !walker_pend;
+
+localparam SRC_CPU = 2'd0, SRC_WALK = 2'd1, SRC_DMA = 2'd2;
+wire  [1:0] s_src = walker_pend ? SRC_WALK : dma_pend ? SRC_DMA : SRC_CPU;
 
 // the beat (or walker access) about to be accepted
-wire [31:2] s_addr  = walker_pend ? walker_addr[31:2] : b_addr;
+wire [31:2] s_addr  = walker_pend ? walker_addr[31:2] : dma_pend ? dma_maddr[31:2] : b_addr;
 wire [31:0] s_la    = {s_addr, 2'b00};
-wire        s_write = walker_pend ? walker_we : b_write;
-wire  [3:0] s_be    = walker_pend ? 4'b1111 : b_be;
-wire [31:0] s_wdata = walker_pend ? walker_wdat : b_wdata;
-wire        s_valid = walker_pend || (b_req && !b_ack && !cpu_berr);
+wire        s_write = walker_pend ? walker_we : dma_pend ? dma_mwe : b_write;
+wire  [3:0] s_be    = walker_pend ? 4'b1111 : dma_pend ? (4'b1000 >> dma_maddr[1:0]) : b_be;
+wire [31:0] s_wdata = walker_pend ? walker_wdat : dma_pend ? {4{dma_mwdata}} : b_wdata;
+wire        s_valid = walker_pend || dma_pend || (b_req && !b_ack && !cpu_berr);
 
 //----------------------------------------------------------------------------
 // Address decode (on a longword address)
@@ -261,6 +275,7 @@ localparam DEV_NEREID  = 3'd2;   // io16
 localparam DEV_CARD    = 3'd3;   // io8: 98550A reset/ID and interrupt register
 localparam DEV_HIL     = 3'd4;   // io8: 8042 data / command-status
 localparam DEV_HPIB    = 3'd5;   // io8: built-in HP-IB card + TMS9914
+localparam DEV_DMA     = 3'd6;   // io16: 98620C DMA
 
 
 reg  [2:0]  d_region;
@@ -288,6 +303,9 @@ always @(*) begin
 		d_region = R_SYS;
 	else if (s_la[31:4] == 28'h005F800) begin  // MC6840 PTM
 		d_region = R_IO8; d_dev = DEV_PTM;
+	end
+	else if (s_la[31:12] == 20'h00500 && s_la[11:0] < 12'h210) begin   // 98620C DMA
+		d_region = R_IO16; d_dev = DEV_DMA;
 	end
 	else if (s_la[31:16] == 16'h0042) begin    // 8042 (mirrored)
 		d_region = R_IO8; d_dev = DEV_HIL;
@@ -411,7 +429,41 @@ wire [31:0] io16_addr  = {svc_addr, io_pend[1] ? 2'd0 : 2'd2};
 wire  [1:0] io16_be    = io_pend[1] ? svc_be[3:2] : svc_be[1:0];
 wire [15:0] io16_wdata = io_pend[1] ? svc_wdata[31:16] : svc_wdata[15:0];
 wire [15:0] cats_dout, ner_dout;
-wire [15:0] io16_rdata = (svc_dev == DEV_NEREID) ? ner_dout : cats_dout;
+wire [15:0] dma_dout;
+wire [15:0] io16_rdata = (svc_dev == DEV_NEREID) ? ner_dout :
+                         (svc_dev == DEV_DMA)    ? dma_dout : cats_dout;
+
+// 98620C DMA: a bus master next to the CPU and the table walker
+wire  [7:1] dma_irq;
+wire  [1:0] dma_dmar = 2'b00;      // no requesting card yet
+wire        dma_dack_rd, dma_dack_wr, dma_dack_ch;
+wire  [7:0] dma_dack_wdata;
+wire  [7:0] dma_dack_rdata = 8'hFF;
+
+hp98620 dma (
+	.clk(clk),
+	.reset(dio_reset),
+	.reg_cs(io16_cs && svc_dev == DEV_DMA),
+	.reg_we(svc_write),
+	.reg_word(io16_addr[9:1]),
+	.reg_be(io16_be),
+	.reg_din(io16_wdata),
+	.reg_dout(dma_dout),
+	.dmar(dma_dmar),
+	.dack_rd(dma_dack_rd),
+	.dack_wr(dma_dack_wr),
+	.dack_ch(dma_dack_ch),
+	.dack_wdata(dma_dack_wdata),
+	.dack_rdata(dma_dack_rdata),
+	.mreq(dma_mreq),
+	.mwe(dma_mwe),
+	.maddr(dma_maddr),
+	.mwdata(dma_mwdata),
+	.mack(dma_mack),
+	.mrdata(dma_mrdata),
+	.merr(dma_merr),
+	.irq_lvl(dma_irq)
+);
 
 // host VRAM accesses
 reg         vr_cpu_req;
@@ -466,7 +518,7 @@ nereid nereid (
 // Interrupts: all autovectored; IPL is the highest pending level
 //----------------------------------------------------------------------------
 wire        gfx_int = card_intreg[7] && gfx_irq;
-wire  [7:1] irq_lvl = {hil_nmi, ptm_irq, 2'b00, hpib_irq, 1'b0, hil_irq1} |
+wire  [7:1] irq_lvl = {hil_nmi, ptm_irq, 2'b00, hpib_irq, 1'b0, hil_irq1} | dma_irq |
                       ((gfx_int ? 7'b0000001 : 7'b0) << (card_intreg[5:3] - 3'd1));
 always @(posedge clk)
 	if (reset) ipl_n <= 3'd7;
@@ -488,11 +540,14 @@ function [31:0] merge_be;
 endfunction
 
 task automatic complete;
-	input        is_walker;
+	input  [1:0] src;
 	input [31:0] data;
 	begin
-		if (is_walker) begin walker_ack <= 1; walker_data <= data; end
-		else           begin b_ack <= 1;      b_rdata <= data;     end
+		case (src)
+		SRC_WALK: begin walker_ack <= 1; walker_data <= data; end
+		SRC_DMA:  begin dma_mack   <= 1; dma_mrdata  <= data; end
+		default:  begin b_ack      <= 1; b_rdata     <= data; end
+		endcase
 	end
 endtask
 
@@ -506,8 +561,8 @@ task automatic event_log;
 		ev_be     <= s_be;
 		ev_write  <= s_write;
 		ev_data   <= data;
-		ev_fc     <= walker_pend ? 3'd5 : bus_fc;
-		ev_walker <= walker_pend;
+		ev_fc     <= s_src == SRC_CPU ? bus_fc : s_src == SRC_WALK ? 3'd5 : 3'd7;
+		ev_walker <= s_src != SRC_CPU;
 	end
 endtask
 
@@ -516,21 +571,29 @@ always @(posedge clk) begin
 	walker_ack  <= 0;
 	walker_berr <= 0;
 	cpu_berr    <= 0;
+	dma_mack    <= 0;
+	dma_merr    <= 0;
+	dma_snoop   <= 0;
 	ev_stb      <= 0;
 	if (!walker_req) walker_armed <= 1;
+	if (!dma_mreq)   dma_armed    <= 1;
 
 	if (reset) begin
 		svc          <= S_IDLE;
 		mem_req      <= 0;
 		vr_cpu_req   <= 0;
 		walker_armed <= 1;
+		dma_armed    <= 1;
 		leds         <= 8'h00;
 		sysreg[0] <= 0; sysreg[1] <= 0; sysreg[2] <= 0; sysreg[3] <= 0;
 	end
 	else case (svc)
 	S_IDLE: if (s_valid) begin
-		svc_walker <= walker_pend;
+		svc_src <= s_src;
 		if (walker_pend) walker_armed <= 0;
+		if (dma_pend)    dma_armed    <= 0;
+		// a DMA write lands behind the CPU's back: drop any cached copy
+		if (dma_pend && dma_mwe) begin dma_snoop <= 1; dma_snoop_addr <= dma_maddr; end
 		case (d_region)
 		R_MEM: begin
 			mem_req     <= 1;
@@ -544,7 +607,7 @@ always @(posedge clk) begin
 		end
 		R_SYS: begin
 			if (s_write) sysreg[s_la[3:2]] <= merge_be(sysreg[s_la[3:2]], s_wdata, s_be);
-			complete(walker_pend, sysreg[s_la[3:2]]);
+			complete(s_src, sysreg[s_la[3:2]]);
 			event_log(EV_SYS, s_write ? s_wdata : sysreg[s_la[3:2]]);
 		end
 		R_IO8: begin
@@ -553,7 +616,7 @@ always @(posedge clk) begin
 			svc_be    <= s_be;
 			svc_write <= s_write;
 			svc_wdata <= s_wdata;
-			svc_fc    <= walker_pend ? 3'd5 : bus_fc;
+			svc_fc    <= s_src == SRC_CPU ? bus_fc : s_src == SRC_WALK ? 3'd5 : 3'd7;
 			io_pend   <= {s_be[2], s_be[0]};
 			io_rdata  <= 32'hFFFF_FFFF;
 			svc       <= S_IO8;
@@ -564,7 +627,7 @@ always @(posedge clk) begin
 			svc_be    <= s_be;
 			svc_write <= s_write;
 			svc_wdata <= s_wdata;
-			svc_fc    <= walker_pend ? 3'd5 : bus_fc;
+			svc_fc    <= s_src == SRC_CPU ? bus_fc : s_src == SRC_WALK ? 3'd5 : 3'd7;
 			io_pend   <= {|s_be[3:2], |s_be[1:0]};
 			io_rdata  <= 32'hFFFF_FFFF;
 			svc       <= S_IO16;
@@ -579,7 +642,7 @@ always @(posedge clk) begin
 			mem_sel    <= 2'd3;      // marks a VRAM access in S_MEM
 		end
 		R_STUB: begin
-			complete(walker_pend, d_stub);
+			complete(s_src, d_stub);
 			event_log(EV_STUB, s_write ? s_wdata : d_stub);
 		end
 		R_ROMW: begin
@@ -590,11 +653,14 @@ always @(posedge clk) begin
 			end
 			else
 				event_log(EV_ROMW, s_wdata);
-			complete(walker_pend, 32'hFFFF_FFFF);
+			complete(s_src, 32'hFFFF_FFFF);
 		end
 		default: begin
-			if (walker_pend) walker_berr <= 1;
-			else             cpu_berr    <= 1;
+			case (s_src)
+			SRC_WALK: walker_berr <= 1;
+			SRC_DMA:  dma_merr    <= 1;
+			default:  cpu_berr    <= 1;
+			endcase
 			event_log(EV_BERR, 32'hFFFF_FFFF);
 		end
 		endcase
@@ -603,7 +669,7 @@ always @(posedge clk) begin
 		if (vr_cpu_ack) begin
 			vr_cpu_req <= 0;
 			svc        <= S_IDLE;
-			complete(svc_walker, vr_cpu_rdata);
+			complete(svc_src, vr_cpu_rdata);
 		end
 	end
 	else if (mem_ack) begin
@@ -613,10 +679,10 @@ always @(posedge clk) begin
 			// card ROM: mem_rdata[31:16] = bytes 2k, 2k+1 for the even
 			// longword half; [15:0] for the odd.  Present them on the odd
 			// lanes, even lanes float high.
-			complete(svc_walker, svc_card_odd ? {8'hFF, mem_rdata[15:8], 8'hFF, mem_rdata[7:0]}
+			complete(svc_src, svc_card_odd ? {8'hFF, mem_rdata[15:8], 8'hFF, mem_rdata[7:0]}
 			                                 : {8'hFF, mem_rdata[31:24], 8'hFF, mem_rdata[23:16]});
 		else
-			complete(svc_walker, mem_rdata);
+			complete(svc_src, mem_rdata);
 	end
 	S_IO8: begin
 		if (io_pend[1]) begin
@@ -628,7 +694,7 @@ always @(posedge clk) begin
 			io_pend[0]      <= 1'b0;
 		end
 		else begin
-			complete(svc_walker, io_rdata);
+			complete(svc_src, io_rdata);
 			ev_stb    <= 1;
 			ev_kind   <= EV_IO8;
 			ev_addr   <= {svc_addr, 2'b00};
@@ -636,7 +702,7 @@ always @(posedge clk) begin
 			ev_write  <= svc_write;
 			ev_data   <= svc_write ? svc_wdata : io_rdata;
 			ev_fc     <= svc_fc;
-			ev_walker <= svc_walker;
+			ev_walker <= svc_src != SRC_CPU;
 			svc       <= S_IDLE;
 		end
 	end
@@ -650,7 +716,7 @@ always @(posedge clk) begin
 			io_pend[0]      <= 1'b0;
 		end
 		else begin
-			complete(svc_walker, io_rdata);
+			complete(svc_src, io_rdata);
 			ev_stb    <= 1;
 			ev_kind   <= EV_IO16;
 			ev_addr   <= {svc_addr, 2'b00};
@@ -658,7 +724,7 @@ always @(posedge clk) begin
 			ev_write  <= svc_write;
 			ev_data   <= svc_write ? svc_wdata : io_rdata;
 			ev_fc     <= svc_fc;
-			ev_walker <= svc_walker;
+			ev_walker <= svc_src != SRC_CPU;
 			svc       <= S_IDLE;
 		end
 	end

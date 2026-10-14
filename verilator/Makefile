@@ -26,6 +26,7 @@ V_SRC = \
 	$(RTL)/upi41.sv \
 	$(RTL)/hil_card.sv \
 	$(RTL)/hpib.sv \
+	$(RTL)/hp98620.sv \
 	$(RTL)/wombat/wombat_cpu.sv \
 	$(RTL)/wombat/wombat_store_buffer.sv \
 	$(RTL)/wombat/wombat_bus32.sv \
