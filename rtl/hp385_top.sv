@@ -10,7 +10,7 @@
 //  Memory map (docs/PLAN_385.md §1):
 //    $00000000-$0001FFFF  boot ROM (mem port, sel 0); write $1FFFC = LEDs
 //    $00420000-$0042FFFF  8042 HIL controller (hil_card.sv), IRQ 1 / NMI 7
-//    $00470000-$0047FFFF  built-in HP-IB + status      (stub)
+//    $00470000-$0047FFFF  built-in HP-IB + status (hpib.sv), IRQ 3
 //    $00200000-$003FFFFF  98550A VRAM through the Catseye (vr_* port)
 //    $00560000-$0056FFFF  98550A: card ROM on odd bytes (mem port, sel 2),
 //                         reset/ID $560001, interrupt reg $560003,
@@ -249,23 +249,8 @@ localparam DEV_CATSEYE = 3'd1;   // io16
 localparam DEV_NEREID  = 3'd2;   // io16
 localparam DEV_CARD    = 3'd3;   // io8: 98550A reset/ID and interrupt register
 localparam DEV_HIL     = 3'd4;   // io8: 8042 data / command-status
+localparam DEV_HPIB    = 3'd5;   // io8: built-in HP-IB card + TMS9914
 
-function [31:0] stub_rdata;   // idle read value of a stub device longword
-	input [31:2] a;
-	reg   [31:0] la;
-	begin
-		la = {a, 2'b00};
-		stub_rdata = 32'h0000_0000;
-		// built-in HP-IB block (odd bytes; docs/reference/mame-hp380.md)
-		if (la[31:16] == 16'h0047) begin
-			case (la[4:2])
-				3'd0: stub_rdata = 32'h0080_0080;   // +1 ID 0x80, +3 status bit 7
-				3'd1: stub_rdata = 32'h0081_0000;   // +5 0x81 (no KBD NMI)
-				default: stub_rdata = 32'h0000_0000;
-			endcase
-		end
-	end
-endfunction
 
 reg  [2:0]  d_region;
 reg  [1:0]  d_sel;
@@ -277,9 +262,7 @@ always @(*) begin
 	d_region = R_BERR;
 	d_sel    = 2'd0;
 	d_maddr  = s_addr;
-	d_stub   = stub_rdata(s_addr);
-	// $470005 bit 2: keyboard NMI status (KBDNMIST, also $478005 by mirror)
-	if (s_la[31:16] == 16'h0047 && s_la[4:2] == 3'd1 && hil_nmi) d_stub = d_stub | 32'h0004_0000;
+	d_stub   = 32'h0000_0000;          // idle read value of an unmodelled device
 	d_dev    = DEV_PTM;
 	if (s_la[31:17] == 15'd0) begin
 		if (s_write) d_region = R_ROMW;
@@ -298,8 +281,9 @@ always @(*) begin
 	else if (s_la[31:16] == 16'h0042) begin    // 8042 (mirrored)
 		d_region = R_IO8; d_dev = DEV_HIL;
 	end
-	else if (s_la[31:16] == 16'h0047)          // HP-IB
-		d_region = R_STUB;
+	else if (s_la[31:16] == 16'h0047) begin    // HP-IB (32-byte block, mirrored)
+		d_region = R_IO8; d_dev = DEV_HPIB;
+	end
 	else if (s_la[31:16] == 16'h0056) begin    // 98550A
 		// card ROM bytes at odd addresses; the first longword holds the
 		// reset/ID and interrupt registers; Catseye/Nereid registers in
@@ -368,9 +352,11 @@ end
 wire  [7:0] hil_dout;
 wire        hil_irq1, hil_nmi;
 
+wire        hpib_card_reset;
+
 hil_card hil (
 	.clk(clk),
-	.reset(dio_reset),
+	.reset(dio_reset || hpib_card_reset),
 	.rom_wr(hil_rom_wr),
 	.rom_addr(hil_rom_addr),
 	.rom_data(hil_rom_data),
@@ -385,8 +371,25 @@ hil_card hil (
 	.dbg_dispatch()
 );
 
+wire  [7:0] hpib_dout;
+wire        hpib_irq;
+
+hpib hpib (
+	.clk(clk),
+	.reset(dio_reset),
+	.cs(io8_cs && svc_dev == DEV_HPIB),
+	.we(io8_we),
+	.addr(io8_addr[4:0]),
+	.din(io8_wdata),
+	.dout(hpib_dout),
+	.kbd_nmi(hil_nmi),
+	.irq(hpib_irq),
+	.card_reset(hpib_card_reset)
+);
+
 wire  [7:0] io8_rdata = (svc_dev == DEV_CARD) ? card_dout :
-                        (svc_dev == DEV_HIL)  ? hil_dout  : ptm_dout;
+                        (svc_dev == DEV_HIL)  ? hil_dout  :
+                        (svc_dev == DEV_HPIB) ? hpib_dout : ptm_dout;
 
 // 16-bit devices: high word half (lanes 3:2) at the beat address, then the
 // low half (lanes 1:0) at +2
@@ -450,7 +453,7 @@ nereid nereid (
 // Interrupts: all autovectored; IPL is the highest pending level
 //----------------------------------------------------------------------------
 wire        gfx_int = card_intreg[7] && gfx_irq;
-wire  [7:1] irq_lvl = {hil_nmi, ptm_irq, 4'b0000, hil_irq1} |
+wire  [7:1] irq_lvl = {hil_nmi, ptm_irq, 2'b00, hpib_irq, 1'b0, hil_irq1} |
                       ((gfx_int ? 7'b0000001 : 7'b0) << (card_intreg[5:3] - 3'd1));
 always @(posedge clk)
 	if (reset) ipl_n <= 3'd7;
