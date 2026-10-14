@@ -1,0 +1,12 @@
+`verilator_config
+// Core internals the headless harness reads for its traces.
+public_flat_rd -module "ap040_core" -var "pc_i"
+public_flat_rd -module "ap040_core" -var "ir"
+public_flat_rd -module "ap040_core" -var "sr"
+public_flat_rd -module "ap040_core" -var "vbr"
+public_flat_rd -module "ap040_core" -var "perf_dispatch_toggle"
+public_flat_rd -module "ap040_core" -var "in_exc"
+public_flat_rd -module "ap040_core" -var "exc_vec"
+public_flat_rd -module "ap040_core" -var "exc_fmt"
+public_flat_rd -module "ap040_core" -var "exc_spc"
+public_flat_rd -module "ap040_core" -var "exc_addr"
