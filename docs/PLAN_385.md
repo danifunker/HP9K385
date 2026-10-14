@@ -24,6 +24,8 @@ Reference material:
 | 2026-10-14 | MC6840 written from the datasheet (`rtl/ptm6840.sv`): E/C1/C3 = 250 kHz (clk/132 at 33 MHz), O3→C2, IRQ 6. The comparison modes count as continuous because the gates are tied low. |
 | 2026-10-14 | MAME is a reference, not an oracle. Its 68040 pushes format $B bus-error frames where a real 040 (and AP68040) pushes format $7. `compare_mame.py` treats the resulting `$13EC` handler detour as expected. |
 | 2026-10-14 | ROM disassemblies (`docs/disasm/*.asm`) stay local (git-ignored) because they are derived from copyrighted ROMs. The analysis README and the generator and patch tools are committed. |
+| 2026-10-14 | The CPU's RESET instruction does **not** reset the DIO cards. In MAME, `reset_cb` is wired only on DIO16 machines. On the 380, the boot ROM's RESET (step 31000, ~0.1 s) lands while the 8042 is still configuring the HIL loop, and resetting it there warm-starts the 8042 with a half-done configuration and no keyboard. |
+| 2026-10-14 | The 8042 runs the real 1820-4784 firmware on our own UPI-41 core (`rtl/upi41.sv`); T48 is VHDL and Verilator can't simulate it. HIL devices are HLE in `hil_card.sv`, following MAME's `hlebase`/`hlekbd`. The first device is a 46021A ITF keyboard; PS/2→HIL translation is in `rtl/ps2_hil_keymap.sv`. |
 
 ---
 

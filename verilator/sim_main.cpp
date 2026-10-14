@@ -12,6 +12,8 @@
 //   --card-rom FILE    98550A card ROM (byte stream); absent = 0xFF
 //   --hil-rom FILE     8042 firmware 1820-4784 (2 KB); absent = the 8042 runs NOPs
 //   --hil-trace FILE   one line per 8042 instruction: cycle pc a
+//   --mlc-trace FILE   HIL link controller writes, reads and loop frames
+//   --key CYC:CODE     at clock CYC send HIL keycode CODE (hex; bit 0 = release); repeatable
 //   --ram-mb N         main RAM size, power of two, 1..128 (default 8)
 //   --cycles N         stop after N clocks (default 50,000,000)
 //   --patch OFF=VAL    sim-only ROM patch: 16-bit VAL at even byte OFF (hex);
@@ -167,7 +169,7 @@ int main(int argc, char **argv) {
 	Verilated::commandArgs(argc, argv);
 	const char *rom_path = nullptr, *card_path = nullptr, *log_path = nullptr;
 	const char *pct_path = nullptr, *fst_path = nullptr, *snap_path = nullptr;
-	const char *hil_path = nullptr, *hilt_path = nullptr;
+	const char *hil_path = nullptr, *hilt_path = nullptr, *mlct_path = nullptr;
 	uint64_t snap_every = 0;
 	bool rom_le = false;
 	unsigned ram_mb = 8;
@@ -175,6 +177,7 @@ int main(int argc, char **argv) {
 	uint64_t pct_max = UINT64_MAX, status_every = 10000000, loop_window = 2000000;
 	int64_t stop_pc = -1;
 	std::vector<std::pair<uint32_t, uint16_t>> patches;
+	std::vector<std::pair<uint64_t, uint8_t>> keys;
 
 	for (int i = 1; i < argc; i++) {
 		std::string a = argv[i];
@@ -187,6 +190,7 @@ int main(int argc, char **argv) {
 		else if (a == "--card-rom") card_path = next();
 		else if (a == "--hil-rom") hil_path = next();
 		else if (a == "--hil-trace") hilt_path = next();
+		else if (a == "--mlc-trace") mlct_path = next();
 		else if (a == "--ram-mb") ram_mb = strtoul(next(), nullptr, 0);
 		else if (a == "--cycles") max_cycles = strtoull(next(), nullptr, 0);
 		else if (a == "--log") log_path = next();
@@ -200,6 +204,12 @@ int main(int argc, char **argv) {
 		else if (a == "--status") status_every = strtoull(next(), nullptr, 0);
 		else if (a == "--snap") snap_path = next();
 		else if (a == "--snap-every") snap_every = strtoull(next(), nullptr, 0);
+		else if (a == "--key") {
+			const char *v = next();
+			const char *c = strchr(v, ':');
+			if (!c) { fprintf(stderr, "--key CYC:CODE\n"); return 2; }
+			keys.push_back({strtoull(v, nullptr, 0), (uint8_t)strtoul(c + 1, nullptr, 16)});
+		}
 		else if (a == "--patch") {
 			const char *v = next();
 			const char *eq = strchr(v, '=');
@@ -226,6 +236,7 @@ int main(int argc, char **argv) {
 	FILE *log = log_path ? fopen(log_path, "w") : stdout;
 	FILE *pct = pct_path ? fopen(pct_path, "w") : nullptr;
 	FILE *hilt = hilt_path ? fopen(hilt_path, "w") : nullptr;
+	FILE *mlct = mlct_path ? fopen(mlct_path, "w") : nullptr;
 	if (!log || (pct_path && !pct)) { perror("log"); return 1; }
 
 	top = new Vhp385_top;
@@ -259,6 +270,12 @@ int main(int argc, char **argv) {
 			top->hil_rom_wr = 1; top->hil_rom_addr = cycle; top->hil_rom_data = hilrom[cycle];
 		} else top->hil_rom_wr = 0;
 		if (cycle == reset_clks) top->reset = 0;
+		top->hil_key_stb = 0;
+		for (auto &k : keys)
+			if (k.first == cycle) {
+				top->hil_key_stb = 1; top->hil_key_code = k.second;
+				printf("[KEY] %02X @%llu\n", k.second, (unsigned long long)cycle);
+			}
 		top->clk = 1;
 		top->eval();
 		mem_service();       // sample the outputs of this edge, answer for the next
@@ -279,8 +296,20 @@ int main(int argc, char **argv) {
 
 		uint32_t pc = CORE(pc_i);
 
-		if (hilt && UPI(dbg_dispatch))
-			fprintf(hilt, "%llu %03X %02X\n", (unsigned long long)cycle, UPI(dbg_pc), UPI(a));
+#define HILC(sig) (top->rootp->hp385_top__DOT__hil__DOT__##sig)
+		if (mlct) {
+			if (HILC(mlc_wr)) fprintf(mlct, "%llu W r%u %02X%s\n", (unsigned long long)cycle, HILC(mlc_reg), HILC(p1_out),
+			                          HILC(mlc_reg) == 0 ? " (frame)" : "");
+			if (HILC(mlc_wr) && HILC(mlc_reg) == 0) fprintf(mlct, "%llu   frame %03X\n", (unsigned long long)cycle, HILC(wr_frame));
+			if (HILC(push)) fprintf(mlct, "%llu   loop -> MLC %03X\n", (unsigned long long)cycle, HILC(push_frame));
+			if (HILC(p1_rd) && HILC(hil_read)) fprintf(mlct, "%llu R r%u = %02X\n", (unsigned long long)cycle, HILC(mlc_reg), HILC(mlc_dout));
+		}
+		if (hilt && UPI(dbg_dispatch)) {
+			// registers of the active bank (R0-R7 at 0 or 24) and loop-state RAM
+			const unsigned rb = (UPI(psw) & 0x10) ? 24 : 0;
+			fprintf(hilt, "%llu %03X %02X r2=%02X r6=%02X 6A=%02X 6B=%02X\n", (unsigned long long)cycle, UPI(dbg_pc), UPI(a),
+			        UPI(ram)[rb + 2], UPI(ram)[rb + 6], UPI(ram)[0x6A], UPI(ram)[0x6B]);
+		}
 
 		bool toggle = CORE(perf_dispatch_toggle);
 		if (toggle != last_toggle) {
@@ -376,6 +405,7 @@ int main(int argc, char **argv) {
 	if (fst) { fst->close(); delete fst; }
 	if (pct) fclose(pct);
 	if (hilt) fclose(hilt);
+	if (mlct) fclose(mlct);
 	if (log != stdout) fclose(log);
 	top->final();
 	delete top;

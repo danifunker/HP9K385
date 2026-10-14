@@ -58,6 +58,10 @@ module hp385_top
 
 	output reg  [7:0] leds,
 
+	// HIL keyboard: one HIL keycode per strobe (bit 0 = release)
+	input             hil_key_stb,
+	input       [7:0] hil_key_code,
+
 	// 8042 firmware load (2 KB, 1820-4784)
 	input             hil_rom_wr,
 	input      [10:0] hil_rom_addr,
@@ -169,9 +173,12 @@ wombat_cpu cpu (
 
 assign cpu_reset_out = !nresetout;
 
-// The RESET instruction resets the DIO cards (MAME: reset_cb -> dio reset_in);
-// the on-board PTM keeps running.
-wire dio_reset = reset || !nresetout;
+// The RESET instruction does not reach the DIO cards: MAME wires the CPU's
+// reset_cb only on the DIO16 machines (hp9k_3xx.cpp add_dio16_bus), and on
+// the 380 the boot ROM executes RESET ~0.1 s after power-up, while the 8042
+// is still configuring the HIL loop.  Resetting the 8042 there leaves it
+// warm-started with a half-done loop configuration and no keyboard.
+wire dio_reset = reset;
 
 wire        b_req, b_write;
 wire [31:2] b_addr;
@@ -365,6 +372,8 @@ hil_card hil (
 	.host_a0(io8_addr[1]),
 	.host_din(io8_wdata),
 	.host_dout(hil_dout),
+	.kbd_stb(hil_key_stb),
+	.kbd_code(hil_key_code),
 	.irq1(hil_irq1),
 	.nmi(hil_nmi),
 	.dbg_pc(),
