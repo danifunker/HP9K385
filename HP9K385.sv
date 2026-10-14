@@ -17,6 +17,7 @@
 //                                boot1.rom  98550A ROM 98550a.bin
 //                                boot2.rom  8042 firmware 1820-4784.bin
 //    keyboard   PS/2 -> HP-HIL ITF keycodes -> the HIL loop
+//    mouse      PS/2 mouse -> HP 46060B on the HIL loop
 //
 //  Overlay planes are not composited by the framebuffer (docs/PLAN_385.md
 //  §4, option A).
@@ -76,6 +77,7 @@ wire   [1:0] buttons;
 wire [127:0] status;
 wire  [10:0] ps2_key;
 wire  [64:0] rtc;
+wire  [24:0] ps2_mouse;
 
 wire        ioctl_download;
 wire  [15:0] ioctl_index;
@@ -97,6 +99,7 @@ hps_io #(.CONF_STR(CONF_STR), .WIDE(1)) hps_io
 
 	.ps2_key(ps2_key),
 	.RTC(rtc),
+	.ps2_mouse(ps2_mouse),
 
 	.ioctl_download(ioctl_download),
 	.ioctl_index(ioctl_index),
@@ -213,6 +216,10 @@ ps2_hil_keymap keymap
 	.key_code(key_code)
 );
 
+// PS/2 mouse -> HIL: {toggle, Y, X, flags(yovf,xovf,ysign,xsign,1,m,r,l)}
+reg         mouse_t;
+always @(posedge clk_sys) mouse_t <= ps2_mouse[24];
+
 reg   [7:0] pal_idx;
 wire [23:0] pal_rgb;
 
@@ -237,6 +244,10 @@ hp385_top machine
 	.rtc_set(rtc),
 	.hil_key_stb(key_stb),
 	.hil_key_code(key_code),
+	.hil_mouse_stb(mouse_t != ps2_mouse[24]),
+	.hil_mouse_dx({ps2_mouse[4], ps2_mouse[15:8]}),
+	.hil_mouse_dy({ps2_mouse[5], ps2_mouse[23:16]}),
+	.hil_mouse_btn(ps2_mouse[2:0]),
 	.hil_rom_wr(hil_wr),
 	.hil_rom_addr(hil_addr),
 	.hil_rom_data(hil_data),

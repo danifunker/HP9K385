@@ -65,6 +65,11 @@ module hp385_top
 	// HIL keyboard: one HIL keycode per strobe (bit 0 = release)
 	input             hil_key_stb,
 	input       [7:0] hil_key_code,
+	// HIL mouse: one relative-motion report per strobe
+	input             hil_mouse_stb,
+	input signed [8:0] hil_mouse_dx,     // right positive
+	input signed [8:0] hil_mouse_dy,     // up positive
+	input       [2:0] hil_mouse_btn,     // {middle, right, left}
 
 	// 8042 firmware load (2 KB, 1820-4784)
 	input             hil_rom_wr,
@@ -400,6 +405,10 @@ hil_card hil (
 	.rtc_set(rtc_set),
 	.kbd_stb(hil_key_stb),
 	.kbd_code(hil_key_code),
+	.mouse_stb(hil_mouse_stb),
+	.mouse_dx(hil_mouse_dx),
+	.mouse_dy(hil_mouse_dy),
+	.mouse_btn(hil_mouse_btn),
 	.irq1(hil_irq1),
 	.nmi(hil_nmi),
 	.dbg_pc(),
