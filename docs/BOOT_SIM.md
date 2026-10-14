@@ -84,8 +84,29 @@ MAME 0.285 `hp9k380` is configured with the 98550A in sl1, the other slots empty
   - Every one of these must bus-error quickly when absent.
 - **Checksum and RAM test:** `$5052` / `$18F6` and `$2528` (flag at `$46A`). The fast-boot patcher handles both. With 8 MB, the sim reaches DD in 6.8M clocks without patches, so we don't need them yet.
 
+## Phase 1 progress (2026-10-14, later the same day)
+
+Modelled since the Phase 0 run above:
+
+- 98550A Catseye and Nereid, with VRAM through the `vram_*` port.
+- The 8042 running the real firmware on `rtl/upi41.sv`.
+- The HIL MLC with an ITF keyboard.
+- The built-in HP-IB as a reduced TMS9914.
+
+**Results:**
+
+- **Fast-boot ROM** (`make -C verilator run-fast`): every self-test passes and the final LED is FF. The console shows "HP-HIL.Keyboard / HP-IB / RAM 8388292 Bytes" and "System Search Mode", the same as MAME.
+- **Key input:** a RETURN injected with `--key 45000000:DA --key 46500000:DB` switches the ROM to attended mode ("Select System, type RETURN").
+- **Unpatched ROM:** the LED sequence matches MAME through DD, including F3.
+
+**Bugs found while bringing it up:**
+
+- **The RESET instruction must not reset the DIO cards.** The boot ROM executes RESET about 0.1 s after power-up, while the 8042 is still configuring the HIL loop. A reset at that point warm-starts the 8042 with the loop configuration half done, so no keyboard is found.
+- **The Catseye's full-screen clears are slow** with the sim's 2-clock VRAM port: about 2.3M clocks for a 1280×1024 clear. The CPU waits behind them. Use `--loop-window 10000000` (or 0) so the stall detector doesn't fire.
+
 ## Next gaps, in boot order
 
-1. **VRAM** at `$200000` (2 MB, stride 2048) and the Catseye STATUS bits, so the console init and the card ROM checksum step (F3) run.
-2. **8042** (real `1820-4784` firmware on an MCS-48 core, or HLE). The ROM waits on it at code 0x22.
-3. **HP-IB** at `$47xxxx` (code 0x24) and DMA (0x28). Both are probed and may stay absent or stubbed for now.
+1. ~~VRAM, Catseye and Nereid~~, ~~8042 + HIL keyboard~~ and ~~HP-IB self-test~~: done.
+2. **Boot devices:** 98620 DMA and 98265A SCSI (Phase 2), so the system search finds something to boot.
+3. **MiSTer shell:** PLL, SDRAM for RAM and ROM, DDR3 for VRAM and scanout, loaders. Then a first Quartus fit.
+4. **Smaller items:** HIL mouse, MSM58321 RTC, SN76494 beeper, 98644 serial.
