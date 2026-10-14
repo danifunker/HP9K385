@@ -1,6 +1,7 @@
 //============================================================================
 //  hp98265a — HP 98265A SCSI interface (select code 14, $6E0000) with its
-//  MB87030 SPC and two SCSI disks (IDs 0 and 1) on the card's bus.
+//  MB87030 SPC, two SCSI disks (IDs 0 and 1) and a CD-ROM (ID 2) on the
+//  card's bus.
 //  Card registers from MAME bus/hp_dio/hp98265a.cpp; the SPC and the disks
 //  are rtl/scsi/ (docs/reference/scsi.md).
 //
@@ -15,8 +16,10 @@
 //  to DMA channel 0 and/or 1 as DE0/DE1 allow; an acknowledge on a channel
 //  that is not enabled is ignored (reads $FF).
 //
-//  Disks: MiSTer hps_io block interface (WIDE, 512-byte blocks), one per ID,
-//  as packed pairs {disk 1, disk 0}.
+//  Targets: MiSTer hps_io block interface (WIDE, 512-byte blocks), one slot
+//  per ID, packed {CD (ID 2), disk 1, disk 0}.  The CD reads flat 2048-byte
+//  sectors (Main presents CUE/CHD that way) at 512 or 2048-byte logical
+//  blocks.
 //============================================================================
 
 module hp98265a
@@ -39,17 +42,17 @@ module hp98265a
 	input       [7:0] dack_wdata,
 	output      [7:0] dack_rdata,
 
-	input       [1:0] img_mounted,
-	input      [63:0] img_size,           // shared by both (sampled on each one's mount pulse)
+	input       [2:0] img_mounted,
+	input      [63:0] img_size,           // shared (sampled on each one's mount pulse)
 	input             img_readonly,
-	output     [63:0] sd_lba,             // {disk 1, disk 0}
-	output      [1:0] sd_rd,
-	output      [1:0] sd_wr,
-	input       [1:0] sd_ack,
+	output     [95:0] sd_lba,             // {CD, disk 1, disk 0}
+	output      [2:0] sd_rd,
+	output      [2:0] sd_wr,
+	input       [2:0] sd_ack,
 	input       [7:0] sd_buff_addr,
 	input      [15:0] sd_buff_dout,
 	input             sd_buff_wr,
-	output     [31:0] sd_buff_din         // {disk 1, disk 0}
+	output     [47:0] sd_buff_din         // {CD, disk 1, disk 0}
 );
 
 reg  [7:0] control;
@@ -62,10 +65,10 @@ wire       spc_irq, spc_dreq;
 wire [7:0] spc_dack_dout;
 
 // ---- the SCSI bus: three devices, wired-OR ----
-wire [7:0] d_spc, d_0, d_1;
-wire [8:0] c_spc, c_0, c_1;                // {rst, atn, sel, bsy, ack, req, msg, cd, io}
-wire [7:0] bus_d = d_spc | d_0 | d_1;
-wire [8:0] bus_c = c_spc | c_0 | c_1;
+wire [7:0] d_spc, d_0, d_1, d_2;
+wire [8:0] c_spc, c_0, c_1, c_2;           // {rst, atn, sel, bsy, ack, req, msg, cd, io}
+wire [7:0] bus_d = d_spc | d_0 | d_1 | d_2;
+wire [8:0] bus_c = c_spc | c_0 | c_1 | c_2;
 
 wire       de_ok = dack_ch ? control[1] : control[0];
 
@@ -95,10 +98,10 @@ mb87030 spc (
 );
 
 genvar g;
-generate for (g = 0; g < 2; g = g + 1) begin : g_disk
+generate for (g = 0; g < 3; g = g + 1) begin : g_disk
 	wire [7:0] d_o;
 	wire [8:0] c_o;
-	scsi_disk #(.ID(g)) disk (
+	scsi_disk #(.ID(g), .CDROM(g == 2)) disk (
 		.clk(clk),
 		.reset(reset),
 		.scsi_data_o(d_o),
@@ -119,8 +122,9 @@ generate for (g = 0; g < 2; g = g + 1) begin : g_disk
 		.sd_buff_wr(sd_buff_wr && sd_ack[g]),
 		.sd_buff_din(sd_buff_din[g*16 +: 16])
 	);
-	if (g == 0) begin : g0 assign d_0 = d_o; assign c_0 = c_o; end
-	else        begin : g1 assign d_1 = d_o; assign c_1 = c_o; end
+	if (g == 0)      begin : g0 assign d_0 = d_o; assign c_0 = c_o; end
+	else if (g == 1) begin : g1 assign d_1 = d_o; assign c_1 = c_o; end
+	else             begin : g2 assign d_2 = d_o; assign c_2 = c_o; end
 end endgenerate
 
 assign irq        = control[7] && spc_irq;

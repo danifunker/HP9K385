@@ -16,6 +16,8 @@
 //    ROMs       games/HP9K385/boot0.rom  boot ROM 1818-5062 (MAME word order)
 //                                boot1.rom  98550A ROM 98550a.bin
 //                                boot2.rom  8042 firmware 1820-4784.bin
+//    SCSI       98265A at select code 14: S0 / S1 disk images on IDs 0 / 1,
+//               S2 CD-ROM on ID 2 (Main's support/hp9k translates CUE/CHD)
 //    keyboard   PS/2 -> HP-HIL ITF keycodes -> the HIL loop
 //    mouse      PS/2 mouse -> HP 46060B on the HIL loop
 //
@@ -46,7 +48,7 @@ assign HDMI_BOB_DEINT = 0;
 assign AUDIO_S   = 1;              // signed: the keyboard beeper (SN76494)
 assign AUDIO_MIX = 0;
 
-assign LED_DISK = 0;
+assign LED_DISK = {1'b0, |sd_ack};
 assign LED_POWER = 0;
 assign BUTTONS = 0;
 
@@ -61,6 +63,10 @@ assign VIDEO_ARY = (!ar) ? 12'd4 : 12'd0;
 `include "build_id.v"
 localparam CONF_STR = {
 	"HP9K385;;",
+	"-;",
+	"S0,IMGHDVRAW,SCSI 0;",
+	"S1,IMGHDVRAW,SCSI 1;",
+	"S2,ISOCUECHD,CD-ROM (SCSI 2);",
 	"-;",
 	"O[3:2],RAM,8 MB,16 MB,32 MB;",
 	"O[122:121],Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
@@ -84,7 +90,26 @@ wire  [26:0] ioctl_addr;
 wire  [15:0] ioctl_dout;
 reg         ioctl_wait = 0;
 
-hps_io #(.CONF_STR(CONF_STR), .WIDE(1)) hps_io
+// SCSI: S0/S1 disks (IDs 0/1), S2 CD-ROM (ID 2)
+wire  [2:0] img_mounted;
+wire        img_readonly;
+wire [63:0] img_size;
+wire [31:0] sd_lba[3];
+wire  [2:0] sd_rd, sd_wr, sd_ack;
+wire  [7:0] sd_buff_addr;
+wire [15:0] sd_buff_dout;
+wire [15:0] sd_buff_din[3];
+wire        sd_buff_wr;
+wire [95:0] m_sd_lba;
+wire [47:0] m_sd_buff_din;
+assign sd_lba[0] = m_sd_lba[31:0];
+assign sd_lba[1] = m_sd_lba[63:32];
+assign sd_lba[2] = m_sd_lba[95:64];
+assign sd_buff_din[0] = m_sd_buff_din[15:0];
+assign sd_buff_din[1] = m_sd_buff_din[31:16];
+assign sd_buff_din[2] = m_sd_buff_din[47:32];
+
+hps_io #(.CONF_STR(CONF_STR), .WIDE(1), .VDNUM(3), .BLKSZ(2)) hps_io
 (
 	.clk_sys(clk_sys),
 	.HPS_BUS(HPS_BUS),
@@ -104,7 +129,20 @@ hps_io #(.CONF_STR(CONF_STR), .WIDE(1)) hps_io
 	.ioctl_wr(ioctl_wr),
 	.ioctl_addr(ioctl_addr),
 	.ioctl_dout(ioctl_dout),
-	.ioctl_wait(ioctl_wait)
+	.ioctl_wait(ioctl_wait),
+
+	.img_mounted(img_mounted),
+	.img_readonly(img_readonly),
+	.img_size(img_size),
+	.sd_lba(sd_lba),
+	.sd_blk_cnt('{6'd0, 6'd0, 6'd0}),
+	.sd_rd(sd_rd),
+	.sd_wr(sd_wr),
+	.sd_ack(sd_ack),
+	.sd_buff_addr(sd_buff_addr),
+	.sd_buff_dout(sd_buff_dout),
+	.sd_buff_din(sd_buff_din),
+	.sd_buff_wr(sd_buff_wr)
 );
 
 ///////////////////////   CLOCKS   ///////////////////////////////
@@ -249,6 +287,18 @@ hp385_top machine
 	.hil_mouse_dx({ps2_mouse[4], ps2_mouse[15:8]}),
 	.hil_mouse_dy({ps2_mouse[5], ps2_mouse[23:16]}),
 	.hil_mouse_btn(ps2_mouse[2:0]),
+	.img_mounted(img_mounted),
+	.img_size(img_size),
+	.img_readonly(img_readonly),
+	.sd_lba(m_sd_lba),
+	.sd_rd(sd_rd),
+	.sd_wr(sd_wr),
+	.sd_ack(sd_ack),
+	.sd_buff_addr(sd_buff_addr),
+	.sd_buff_dout(sd_buff_dout),
+	.sd_buff_wr(sd_buff_wr),
+	.sd_buff_din(m_sd_buff_din),
+
 	.hil_rom_wr(hil_wr),
 	.hil_rom_addr(hil_addr),
 	.hil_rom_data(hil_data),

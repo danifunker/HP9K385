@@ -2,7 +2,7 @@
 
 RTL:
 - `rtl/scsi/mb87030.sv` is the Fujitsu MB87030 SPC. It only plays the initiator role.
-- `rtl/scsi/scsi_disk.sv` is a SCSI disk target that is backed by a MiSTer block device.
+- `rtl/scsi/scsi_disk.sv` is a SCSI disk target that is backed by a MiSTer block device. With `CDROM = 1` it is a CD-ROM instead (see "CD-ROM personality" below).
 
 Bench: `tb/tb_scsi.sv`.
 
@@ -254,6 +254,60 @@ An `img_mounted` pulse latches:
 
 The mount state starts at zero and **is not cleared by `reset`**, because the HPS does not mount again after a core reset. `reset` clears the target state machine, the sense data and any pending `sd_rd` or `sd_wr`. hps_io may still complete a request that it had already picked up; the disk ignores it.
 
+### CD-ROM personality (`CDROM = 1`)
+
+The parameter is `scsi_disk #(.ID(n), .CDROM(1))`. The port list is the same, and `CDROM = 0` (the default) behaves as described above. The model is an HP-300-era SCSI CD-ROM such as the Toshiba XM-3301 or Sony CDU-561.
+
+**Image.** The image is a flat run of 2048-byte data sectors, which is how MiSTer's Main presents CUE and CHD images. The block side still moves 512-byte host blocks: CD sector N is host blocks 4N to 4N+3.
+
+**Block length.** The logical block length is 512 by default, which is what the HP 300 boot ROM and HP-UX 9 expect. MODE SELECT(6) changes it through the block descriptor:
+- The block length is taken from parameter-list bytes 9-11, when the list is at least 12 bytes and the block-descriptor length (byte 3) is at least 8.
+- A block length of 512 or 2048 is accepted.
+- Any other block length gets CHECK CONDITION, ILLEGAL REQUEST/26 (invalid field in parameter list), and the setting is left unchanged.
+- A list with no block descriptor is accepted and changes nothing. The rest of the list (density, pages) is ignored.
+
+The block length goes back to 512 on `reset` and on every mount. It is **not** reset by SCSI RST, because there is no power-on UNIT ATTENTION to tell the host.
+
+These commands work in the current block length:
+- READ(6) and READ(10): the LBA and count are in current blocks. At 2048 they are converted to host blocks (×4).
+- The range check: LBA + count must be ≤ image size / block length.
+- READ CAPACITY: returns the last LBA and the current block length.
+- The MODE SENSE block descriptor: returns the block count and length. The density code is 0.
+
+**Commands that differ from the disk:**
+
+| Op | Command | CD-ROM result |
+|---|---|---|
+| 12 | INQUIRY | Peripheral type 05h, RMB = 1 (byte 1 = 80h), ANSI version 2, vendor `HP9K385 `, product `SCSI CD-ROM     ` |
+| 0A / 2A | WRITE(6) / WRITE(10) | DATA PROTECT/27, whatever `img_readonly` says |
+| 04 | FORMAT UNIT | ILLEGAL REQUEST/20 (not supported) |
+| 1A | MODE SENSE(6) | Header with WP set, plus the block descriptor. No pages are returned, 03h, 04h and 3Fh included. |
+| 1B, 1E | START STOP UNIT, PREVENT ALLOW | GOOD. Eject is a no-op. |
+| 43 | READ TOC | See below |
+| 42 | READ SUB-CHANNEL | A 4-byte header: audio status 15h (no current audio status), data length 0, limited by the allocation length in CDB[7:8] |
+| 44 | READ HEADER | LBA form only. It returns 8 bytes: data mode 1, then the LBA from the CDB. MSF = 1 gets ILLEGAL REQUEST/24. |
+| 45, 47, 48, 4B, … | PLAY AUDIO and other audio commands | ILLEGAL REQUEST/20. Audio will come later through Main's CD-audio windows. |
+
+**READ TOC (43h).** Only format 0 is supported; the format field is ignored. CDB[1] bit 1 is MSF, CDB[6] is the starting track, and CDB[7:8] is the allocation length.
+
+The response starts with a header: TOC data length (total - 2), first track 1, last track 1. Then come 8-byte descriptors:
+- **Track 1:** ADR/control 14h (ADR 1, data track). The address is LBA 0, or 00:02:00 in MSF.
+- **Lead-out (AAh):** ADR/control 14h. The address is the image size in current logical blocks for the LBA form. For MSF it is (sectors + 150) frames as minutes:seconds:frames. That value is worked out once after a mount, by repeated subtraction (about 2 cycles per minute plus 1 per second).
+
+The starting track selects what is returned:
+- 0 or 1: header plus both descriptors, 20 bytes.
+- AAh: header plus the lead-out descriptor only, 12 bytes.
+- Anything else: ILLEGAL REQUEST/24 (invalid field in CDB).
+
+The allocation length is honoured, while the header still states the full length.
+
+**No medium and medium change.**
+- With no image, every command except INQUIRY and REQUEST SENSE gets NOT READY/3A.
+- A mount (an `img_mounted` pulse with a size other than 0) sets a UNIT ATTENTION flag, which survives `reset`. The next command other than INQUIRY or REQUEST SENSE gets CHECK CONDITION, UNIT ATTENTION/28 (not ready to ready transition), and the flag clears. TEST UNIT READY reports it too.
+- If REQUEST SENSE arrives first, it reports 06/28 and clears the flag.
+- Unknown opcodes are checked after the unit attention, as SCSI requires.
+- The disk personality has no unit attention.
+
 ## How the 98265A card uses it (from `hp98265a.cpp`)
 
 The card sits at DIO-I select code `sc`, which MAME defaults to 14, at `0x600000 + sc * 0x10000`. The card's 16-bit registers are:
@@ -282,9 +336,10 @@ Each part of the card connects to the SPC as follows:
 
 ## Bench
 
-`tb/tb_scsi.sv` puts one SPC and two disks on the bus:
+`tb/tb_scsi.sv` puts one SPC and three targets on the bus:
 - disk 0 has a 64-block image behind an hps_io-timed block-device model, which checks that `sd_rd`/`sd_wr` are held until `sd_ack` and dropped after it;
 - disk 3 has no image;
+- ID 2 is a CD-ROM with an 8-sector image, served by `tb_blkdev`, the same model packaged as a module;
 - ID 5 is absent.
 
 A NetBSD-style register driver then runs:
@@ -299,6 +354,16 @@ A NetBSD-style register driver then runs:
 - MODE SENSE 3Fh;
 - out-of-range READ and an unknown opcode, each followed by REQUEST SENSE;
 - on ID 3, without arbitration: TEST UNIT READY → CHECK CONDITION, then REQUEST SENSE → NOT READY/3A, then INQUIRY;
+- on the ID 2 CD-ROM:
+  - before the mount, TEST UNIT READY gives NOT READY/3A;
+  - after the mount: INQUIRY (type 05h, RMB, product string), then TEST UNIT READY → UNIT ATTENTION, REQUEST SENSE → 06/28, and TEST UNIT READY → GOOD;
+  - READ CAPACITY at 512, then READ(10) at 512 by DMA, compared against the image;
+  - MODE SELECT to 2048, then READ CAPACITY and MODE SENSE at 2048, then READ(10) and READ(6) at 2048, compared against the image;
+  - a read past the end;
+  - WRITE(10) and WRITE(6) → DATA PROTECT, FORMAT and PLAY AUDIO → ILLEGAL REQUEST, START STOP UNIT and PREVENT ALLOW → GOOD;
+  - READ TOC in LBA and MSF form, from AAh, with a short allocation length, and with track 2 → ILLEGAL REQUEST/24;
+  - READ SUB-CHANNEL;
+  - MODE SELECT 1024 → ILLEGAL REQUEST/26, then back to 512 with READ CAPACITY and the READ TOC lead-out checked;
 - on ID 5: selection time-out (INTS 0x04), then termination and recovery.
 
 Along the way it checks:
@@ -306,7 +371,14 @@ Along the way it checks:
 - the `irq` pin;
 - that ACK is held on the last MESSAGE IN byte;
 - the bus-free interrupt (INTS 0x20);
-- that no two devices drive the same data bit.
+- that no two devices drive the same data bit;
+- that the CD-ROM never issues a block write.
+
+The bench was mutation-checked; each of these mutations makes it fail:
+- SPC side: no same-cycle dack correction, no `inflight` term in `dreq`, ACK not held on MESSAGE IN, ATN not dropped, no phase check, TC not cleared on time-out;
+- `sd_buff_din` byte swap;
+- disk side: wrong sense key;
+- CD side: no unit attention, no ×4 LBA conversion at 2048, no 150-frame pregap in MSF, no RMB bit, MODE SELECT accepting 1024, CD writable, READ CAPACITY block length stuck at 512.
 
 Run it with:
 

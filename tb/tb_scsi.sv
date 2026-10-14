@@ -3,6 +3,9 @@
 //  wired-OR bus.  Disk ID 0 has a 64-block image served by a behavioural
 //  hps_io block-device model; disk ID 3 has no image; ID 5 is absent.
 //
+//  Disk ID 2 is a CD-ROM (CDROM=1) with an 8-sector (2048-byte) image,
+//  mounted part-way through the test.
+//
 //  A behavioural "CPU" drives the SPC registers the way NetBSD's spc driver
 //  does (select with ATN + IDENTIFY, phase-driven program transfers, DMA
 //  transfers through dreq / dack, MESSAGE IN with ACK held, bus-free
@@ -38,10 +41,10 @@ endtask
 //----------------------------------------------------------------------------
 // the bus: [0] I/O [1] C/D [2] MSG [3] BSY [4] SEL [5] REQ [6] ACK [7] ATN [8] RST
 //----------------------------------------------------------------------------
-wire [8:0] c_spc, c_d0, c_d3;
-wire [7:0] d_spc, d_d0, d_d3;
-wire [8:0] bc = c_spc | c_d0 | c_d3;
-wire [7:0] bd = d_spc | d_d0 | d_d3;
+wire [8:0] c_spc, c_d0, c_d3, c_cd;
+wire [7:0] d_spc, d_d0, d_d3, d_cd;
+wire [8:0] bc = c_spc | c_d0 | c_d3 | c_cd;
+wire [7:0] bd = d_spc | d_d0 | d_d3 | d_cd;
 
 // SPC host side
 reg        cs = 0, we = 0;
@@ -124,8 +127,44 @@ always @(posedge clk)
 
 // only one device may drive a given data bit at a time
 always @(posedge clk)
-	if (!reset && ((d_spc & d_d0) | (d_spc & d_d3) | (d_d0 & d_d3)) != 0)
-		chk(0, $sformatf("data bus contention spc=%02x d0=%02x d3=%02x", d_spc, d_d0, d_d3));
+	if (!reset && ((d_spc & d_d0) | (d_spc & d_d3) | (d_d0 & d_d3) |
+	               (d_cd & (d_spc | d_d0 | d_d3))) != 0)
+		chk(0, $sformatf("data bus contention spc=%02x d0=%02x d3=%02x cd=%02x", d_spc, d_d0, d_d3, d_cd));
+
+// ID 2: CD-ROM, with its own block device
+localparam CD_SECT = 8;                     // 2048-byte sectors
+reg         cd_mounted = 0;
+reg  [63:0] cd_size = 0;
+wire [31:0] cd_lba;
+wire        cd_rd, cd_wr, cd_ack, cd_bwr;
+wire  [7:0] cd_baddr;
+wire [15:0] cd_bdout, cd_bdin;
+
+scsi_disk #(.ID(3'd2), .CDROM(1)) cdrom
+(
+	.clk(clk), .reset(reset),
+	.scsi_data_o(d_cd),
+	.scsi_bsy_o(c_cd[3]), .scsi_sel_o(c_cd[4]), .scsi_atn_o(c_cd[7]), .scsi_ack_o(c_cd[6]),
+	.scsi_rst_o(c_cd[8]), .scsi_req_o(c_cd[5]), .scsi_msg_o(c_cd[2]), .scsi_cd_o(c_cd[1]),
+	.scsi_io_o(c_cd[0]),
+	.scsi_data_i(bd),
+	.scsi_bsy_i(bc[3]), .scsi_sel_i(bc[4]), .scsi_atn_i(bc[7]), .scsi_ack_i(bc[6]), .scsi_rst_i(bc[8]),
+	.scsi_req_i(bc[5]), .scsi_msg_i(bc[2]), .scsi_cd_i(bc[1]), .scsi_io_i(bc[0]),
+	.img_mounted(cd_mounted), .img_size(cd_size), .img_readonly(1'b0),   // read-only anyway
+	.sd_lba(cd_lba), .sd_rd(cd_rd), .sd_wr(cd_wr), .sd_ack(cd_ack),
+	.sd_buff_addr(cd_baddr), .sd_buff_dout(cd_bdout), .sd_buff_wr(cd_bwr),
+	.sd_buff_din(cd_bdin)
+);
+
+tb_blkdev #(.NBLK(CD_SECT * 4)) cd_dev
+(
+	.clk(clk), .reset(reset),
+	.sd_lba(cd_lba), .sd_rd(cd_rd), .sd_wr(cd_wr), .sd_ack(cd_ack),
+	.sd_buff_addr(cd_baddr), .sd_buff_dout(cd_bdout), .sd_buff_wr(cd_bwr), .sd_buff_din(cd_bdin)
+);
+
+always @(posedge clk)
+	if (!reset && cd_wr) chk(0, "CD-ROM made a block write");
 
 //----------------------------------------------------------------------------
 // block device for disk 0 (hps_io WIDE=1 timing, little-endian words)
@@ -234,7 +273,7 @@ task automatic wait_ints(output [7:0] v);
 	do begin
 		rd(INTS, v);
 		n++;
-	end while (v == 8'h00 && n < 200000);
+	end while (v == 8'h00 && n < 2000000);
 	chk(v != 8'h00, "timeout waiting for INTS");
 	#1 chk(irq == 1'b1, "irq pin low with INTS set and SCTL IE");
 endtask
@@ -251,7 +290,7 @@ task automatic wait_req(output [2:0] ph);
 	do begin
 		rd(PSNS, p);
 		n++;
-	end while (!p[7] && n < 200000);
+	end while (!p[7] && n < 2000000);
 	chk(p[7], "timeout waiting for REQ");
 	chk(p[3], "REQ without BSY");
 	ph = p[2:0];
@@ -342,7 +381,7 @@ task automatic run_cmd(input int tgt, input bit atn, input bit arb, input int cl
                        output [7:0] stat);
 	reg [7:0] v, s, p, m;
 	reg [2:0] ph;
-	int got;
+	int got, nph;
 	bit done;
 	select(tgt, atn, arb, v);
 	chk(v == 8'h10, $sformatf("select %0d: INTS %02x, want 10", tgt, v));
@@ -361,7 +400,14 @@ task automatic run_cmd(input int tgt, input bit atn, input bit arb, input int cl
 	last_in = 0;
 	stat = 8'hFF;
 	done = 0;
+	nph  = 0;
 	while (!done) begin
+		nph++;
+		if (nph > 16) begin
+			chk(0, $sformatf("target %0d op %02x: no end of command after 16 phases", tgt, cdbb[0]));
+			$display("FAILED: %0d errors", errors);
+			$finish;
+		end
 		wait_req(ph);
 		rd(PSNS, p);
 		chk(!p[5], $sformatf("ATN still up after MESSAGE OUT (PSNS %02x)", p));
@@ -428,10 +474,45 @@ task automatic set_cdb10(input [7:0] op, input [31:0] lba, input [15:0] n);
 	cdbb[9] = 0;
 endtask
 
+task automatic sense_is(input int tgt, input [7:0] key, input [7:0] asc, input string what);
+	reg [7:0] st;
+	set_cdb6(8'h03, 0, 0, 0, 18, 0);
+	run_cmd(tgt, 1, 1, 6, 0, 18, 0, st);
+	chk(st == 8'h00 && last_in == 18, {what, ": REQUEST SENSE"});
+	chk(dbuf[2] == key && dbuf[12] == asc,
+	    $sformatf("%s: sense %02x/%02x, want %02x/%02x", what, dbuf[2], dbuf[12], key, asc));
+endtask
+
+task automatic cap_is(input int tgt, input int last, input int len, input string what);
+	reg [7:0] st;
+	set_cdb10(8'h25, 0, 0);
+	run_cmd(tgt, 1, 1, 10, 0, 8, 0, st);
+	chk(st == 8'h00 && last_in == 8, {what, ": READ CAPACITY status"});
+	chk({dbuf[0], dbuf[1], dbuf[2], dbuf[3]} == last && {dbuf[4], dbuf[5], dbuf[6], dbuf[7]} == len,
+	    $sformatf("%s: READ CAPACITY %0d / %0d, want %0d / %0d", what,
+	              {dbuf[0], dbuf[1], dbuf[2], dbuf[3]}, {dbuf[4], dbuf[5], dbuf[6], dbuf[7]}, last, len));
+endtask
+
+// MODE SELECT(6): header + one block descriptor with the given block length
+task automatic mode_select(input int tgt, input [23:0] blen, output [7:0] st);
+	for (int i = 0; i < 12; i++) obuf[i] = 8'h00;
+	obuf[3] = 8'd8;
+	{obuf[9], obuf[10], obuf[11]} = blen;
+	set_cdb6(8'h15, 8'h10, 0, 0, 12, 0);
+	run_cmd(tgt, 1, 1, 6, 0, 12, 0, st);
+endtask
+
+task automatic read_toc(input bit msf, input [7:0] track, input [15:0] alloc, output [7:0] st);
+	cdbb[0] = 8'h43; cdbb[1] = msf ? 8'h02 : 8'h00; cdbb[2] = 0; cdbb[3] = 0; cdbb[4] = 0; cdbb[5] = 0;
+	cdbb[6] = track; cdbb[7] = alloc[15:8]; cdbb[8] = alloc[7:0]; cdbb[9] = 0;
+	run_cmd(2, 1, 1, 10, 0, alloc, 0, st);
+endtask
+
 //----------------------------------------------------------------------------
 // the test
 //----------------------------------------------------------------------------
 reg [7:0] v, s, p, st;
+reg [7:0] cdgold [0:CD_SECT*2048-1];
 reg [7:0] golden [0:NBLK*512-1];
 int bad;
 
@@ -591,6 +672,136 @@ initial begin
 	chk(st == 8'h00 && last_in == 36 && dbuf[0] == 8'h00, "ID 3 INQUIRY");
 	$display("ID 3 (no image) ok");
 
+	// ---- ID 2: CD-ROM ----
+	set_cdb6(8'h00, 0, 0, 0, 0, 0);
+	run_cmd(2, 1, 1, 6, 0, 0, 0, st);
+	chk(st == 8'h02, $sformatf("CD TEST UNIT READY with no medium: %02x, want 02", st));
+	sense_is(2, 8'h02, 8'h3A, "CD no medium");
+	for (int i = 0; i < CD_SECT*2048; i++) begin
+		cd_dev.img[i] = 8'((i >> 11) * 8'h40 + (i >> 9) * 8'h11 + (i & 511) * 5 + (i >> 8));
+		cdgold[i]     = cd_dev.img[i];
+	end
+	@(negedge clk); cd_size = CD_SECT * 2048; cd_mounted = 1;
+	@(negedge clk); cd_mounted = 0;
+	set_cdb6(8'h12, 0, 0, 0, 36, 0);
+	run_cmd(2, 1, 1, 6, 0, 36, 0, st);
+	chk(st == 8'h00 && last_in == 36, "CD INQUIRY status");
+	chk(dbuf[0] == 8'h05 && dbuf[1] == 8'h80 && dbuf[2] == 8'h02,
+	    $sformatf("CD INQUIRY type %02x rmb %02x ver %02x, want 05 80 02", dbuf[0], dbuf[1], dbuf[2]));
+	chk({dbuf[8], dbuf[9], dbuf[10], dbuf[11], dbuf[12], dbuf[13], dbuf[14], dbuf[15]} == "HP9K385 ", "CD vendor");
+	chk({dbuf[16], dbuf[17], dbuf[18], dbuf[19], dbuf[20], dbuf[21], dbuf[22], dbuf[23], dbuf[24], dbuf[25], dbuf[26]}
+	    == "SCSI CD-ROM", "CD product");
+	set_cdb6(8'h00, 0, 0, 0, 0, 0);
+	run_cmd(2, 1, 1, 6, 0, 0, 0, st);
+	chk(st == 8'h02, $sformatf("CD TEST UNIT READY after mount: %02x, want 02 (unit attention)", st));
+	sense_is(2, 8'h06, 8'h28, "CD unit attention");
+	set_cdb6(8'h00, 0, 0, 0, 0, 0);
+	run_cmd(2, 1, 1, 6, 0, 0, 0, st);
+	chk(st == 8'h00, $sformatf("CD TEST UNIT READY after the unit attention: %02x", st));
+	cap_is(2, CD_SECT * 4 - 1, 512, "CD at 512");
+
+	// READ(10) at 512: LBA 3, 5 blocks
+	set_cdb10(8'h28, 3, 5);
+	run_cmd(2, 1, 1, 10, 1, 2560, 0, st);
+	chk(st == 8'h00, "CD READ(10) at 512 status");
+	bad = 0;
+	for (int i = 0; i < 2560; i++) if (dbuf[i] != cdgold[3*512 + i]) bad++;
+	chk(bad == 0, $sformatf("CD READ(10) at 512: %0d bytes differ", bad));
+
+	// MODE SELECT: block length 2048
+	mode_select(2, 24'd2048, st);
+	chk(st == 8'h00, "CD MODE SELECT 2048 status");
+	cap_is(2, CD_SECT - 1, 2048, "CD at 2048");
+	set_cdb6(8'h1A, 0, 8'h00, 0, 255, 0);
+	run_cmd(2, 1, 1, 6, 0, 255, 0, st);
+	chk(st == 8'h00 && last_in == 12 && dbuf[0] == 8'd11 && dbuf[3] == 8'd8,
+	    $sformatf("CD MODE SENSE: %0d bytes, header %02x %02x", last_in, dbuf[0], dbuf[3]));
+	chk(dbuf[2][7], "CD MODE SENSE WP");
+	chk(dbuf[4] == 8'h00 && {dbuf[5], dbuf[6], dbuf[7]} == CD_SECT && {dbuf[9], dbuf[10], dbuf[11]} == 2048,
+	    "CD MODE SENSE block descriptor");
+
+	// READ(10) and READ(6) at 2048
+	set_cdb10(8'h28, 2, 3);
+	run_cmd(2, 1, 1, 10, 1, 6144, 0, st);
+	chk(st == 8'h00, "CD READ(10) at 2048 status");
+	bad = 0;
+	for (int i = 0; i < 6144; i++) if (dbuf[i] != cdgold[2*2048 + i]) bad++;
+	chk(bad == 0, $sformatf("CD READ(10) at 2048: %0d bytes differ", bad));
+	set_cdb6(8'h08, 0, 0, 8'd7, 1, 0);
+	run_cmd(2, 1, 1, 6, 1, 2048, 0, st);
+	chk(st == 8'h00, "CD READ(6) at 2048 status");
+	bad = 0;
+	for (int i = 0; i < 2048; i++) if (dbuf[i] != cdgold[7*2048 + i]) bad++;
+	chk(bad == 0, $sformatf("CD READ(6) at 2048: %0d bytes differ", bad));
+	set_cdb10(8'h28, 7, 2);
+	run_cmd(2, 1, 1, 10, 1, 4096, 0, st);
+	chk(st == 8'h02, "CD READ past the end at 2048");
+	sense_is(2, 8'h05, 8'h21, "CD LBA out of range");
+
+	// refused commands
+	set_cdb10(8'h2A, 0, 1);
+	run_cmd(2, 1, 1, 10, 1, 2048, 0, st);
+	chk(st == 8'h02, "CD WRITE(10) status");
+	sense_is(2, 8'h07, 8'h27, "CD WRITE -> DATA PROTECT");
+	set_cdb6(8'h0A, 0, 0, 0, 1, 0);
+	run_cmd(2, 1, 1, 6, 1, 2048, 0, st);
+	chk(st == 8'h02, "CD WRITE(6) status");
+	sense_is(2, 8'h07, 8'h27, "CD WRITE(6) -> DATA PROTECT");
+	set_cdb6(8'h04, 0, 0, 0, 0, 0);
+	run_cmd(2, 1, 1, 6, 0, 0, 0, st);
+	chk(st == 8'h02, "CD FORMAT status");
+	sense_is(2, 8'h05, 8'h20, "CD FORMAT -> ILLEGAL REQUEST");
+	set_cdb10(8'h45, 0, 1);                  // PLAY AUDIO(10)
+	run_cmd(2, 1, 1, 10, 0, 0, 0, st);
+	chk(st == 8'h02, "CD PLAY AUDIO status");
+	sense_is(2, 8'h05, 8'h20, "CD PLAY AUDIO -> ILLEGAL REQUEST");
+	set_cdb6(8'h1B, 0, 0, 0, 2, 0);          // START STOP UNIT, eject
+	run_cmd(2, 1, 1, 6, 0, 0, 0, st);
+	chk(st == 8'h00, "CD START STOP UNIT");
+	set_cdb6(8'h1E, 0, 0, 0, 1, 0);          // PREVENT
+	run_cmd(2, 1, 1, 6, 0, 0, 0, st);
+	chk(st == 8'h00, "CD PREVENT ALLOW");
+
+	// READ TOC, LBA form (2048-byte blocks): track 1 at 0, lead-out at 8
+	read_toc(0, 8'd0, 16'd804, st);
+	chk(st == 8'h00 && last_in == 20, $sformatf("READ TOC: status %02x, %0d bytes", st, last_in));
+	chk(dbuf[0] == 8'd0 && dbuf[1] == 8'd18 && dbuf[2] == 8'd1 && dbuf[3] == 8'd1, "READ TOC header");
+	chk(dbuf[5] == 8'h14 && dbuf[6] == 8'd1 && {dbuf[8], dbuf[9], dbuf[10], dbuf[11]} == 0, "READ TOC track 1");
+	chk(dbuf[13] == 8'h14 && dbuf[14] == 8'hAA && {dbuf[16], dbuf[17], dbuf[18], dbuf[19]} == CD_SECT,
+	    $sformatf("READ TOC lead-out %02x %02x%02x%02x%02x", dbuf[14], dbuf[16], dbuf[17], dbuf[18], dbuf[19]));
+	// MSF form: track 1 at 00:02:00, lead-out at 8 + 150 frames = 00:02:08
+	read_toc(1, 8'd1, 16'd804, st);
+	chk(st == 8'h00 && last_in == 20, "READ TOC MSF length");
+	chk({dbuf[8], dbuf[9], dbuf[10], dbuf[11]} == 32'h00000200, "READ TOC MSF track 1");
+	chk({dbuf[16], dbuf[17], dbuf[18], dbuf[19]} == 32'h00000208,
+	    $sformatf("READ TOC MSF lead-out %02x:%02x:%02x", dbuf[17], dbuf[18], dbuf[19]));
+	// lead-out only, allocation length, bad track
+	read_toc(0, 8'hAA, 16'd804, st);
+	chk(st == 8'h00 && last_in == 12 && dbuf[1] == 8'd10 && dbuf[6] == 8'hAA, "READ TOC from AAh");
+	read_toc(0, 8'd0, 16'd12, st);
+	chk(st == 8'h00 && last_in == 12 && dbuf[1] == 8'd18, $sformatf("READ TOC alloc 12: %0d bytes", last_in));
+	read_toc(0, 8'd2, 16'd804, st);
+	chk(st == 8'h02, "READ TOC track 2");
+	sense_is(2, 8'h05, 8'h24, "READ TOC track 2 -> INVALID FIELD IN CDB");
+	// READ SUB-CHANNEL
+	cdbb[0] = 8'h42; cdbb[1] = 0; cdbb[2] = 8'h40; cdbb[3] = 8'h01; cdbb[4] = 0; cdbb[5] = 0; cdbb[6] = 0;
+	cdbb[7] = 0; cdbb[8] = 8'd16; cdbb[9] = 0;
+	run_cmd(2, 1, 1, 10, 0, 16, 0, st);
+	chk(st == 8'h00 && last_in == 4 && dbuf[1] == 8'h15, "READ SUB-CHANNEL");
+
+	// bad block length is refused; back to 512
+	mode_select(2, 24'd1024, st);
+	chk(st == 8'h02, "CD MODE SELECT 1024 status");
+	sense_is(2, 8'h05, 8'h26, "CD MODE SELECT 1024 -> INVALID FIELD IN PARAMETER LIST");
+	cap_is(2, CD_SECT - 1, 2048, "CD still at 2048");
+	mode_select(2, 24'd512, st);
+	chk(st == 8'h00, "CD MODE SELECT 512 status");
+	cap_is(2, CD_SECT * 4 - 1, 512, "CD back at 512");
+	read_toc(0, 8'hAA, 16'd804, st);
+	chk({dbuf[8], dbuf[9], dbuf[10], dbuf[11]} == CD_SECT * 4, "READ TOC lead-out at 512");
+	chk(cd_dev.errors == 0, "CD block device model errors");
+	$display("CD-ROM ok (%0d block reads)", cd_dev.reads);
+
 	// ---- ID 5 absent: selection time-out ----
 	select(5, 1, 1, v);
 	chk(v == 8'h04, $sformatf("absent ID 5: INTS %02x, want 04", v));
@@ -617,6 +828,76 @@ initial begin
 	#200ms;
 	$display("FAIL: global timeout");
 	$finish;
+end
+
+endmodule
+
+//============================================================================
+//  tb_blkdev — hps_io-timed block device (WIDE=1, 512-byte blocks,
+//  little-endian words) with its image in `img`.
+//============================================================================
+module tb_blkdev
+#(
+	parameter NBLK = 32
+)
+(
+	input             clk,
+	input             reset,
+	input      [31:0] sd_lba,
+	input             sd_rd,
+	input             sd_wr,
+	output reg        sd_ack = 0,
+	output reg  [7:0] sd_buff_addr = 0,
+	output reg [15:0] sd_buff_dout = 0,
+	output reg        sd_buff_wr = 0,
+	input      [15:0] sd_buff_din
+);
+
+reg [7:0] img [0:NBLK*512-1];
+integer   errors = 0, reads = 0, writes = 0;
+
+task automatic err(input string what);
+	errors++;
+	$display("FAIL @%0t: %m: %s", $time, what);
+endtask
+
+initial begin
+	forever begin
+		@(negedge clk);
+		if (!reset && (sd_rd || sd_wr)) begin
+			bit isrd;
+			int l;
+			isrd = sd_rd;
+			l    = sd_lba;
+			if (sd_rd && sd_wr) err("sd_rd and sd_wr together");
+			if (l >= NBLK) err($sformatf("sd_lba %0d out of range", l));
+			repeat ($urandom_range(5, 60)) begin
+				@(negedge clk);
+				if (!(isrd ? sd_rd : sd_wr)) err("block request dropped before sd_ack");
+				if (sd_lba != l) err("sd_lba changed while requesting");
+			end
+			sd_ack       = 1;
+			sd_buff_addr = 0;
+			repeat (2) @(negedge clk);
+			if (sd_rd || sd_wr) err("block request still up after sd_ack");
+			for (int w = 0; w < 256; w++) begin
+				sd_buff_addr = w;
+				if (isrd) begin
+					sd_buff_dout = (l < NBLK) ? {img[l*512 + 2*w + 1], img[l*512 + 2*w]} : 16'h0000;
+					@(negedge clk); sd_buff_wr = 1;
+					@(negedge clk); sd_buff_wr = 0;
+					@(negedge clk);
+				end
+				else begin
+					repeat ($urandom_range(2, 4)) @(negedge clk);
+					if (l < NBLK) {img[l*512 + 2*w + 1], img[l*512 + 2*w]} = sd_buff_din;
+				end
+			end
+			repeat (2) @(negedge clk);
+			sd_ack = 0;
+			if (isrd) reads++; else writes++;
+		end
+	end
 end
 
 endmodule

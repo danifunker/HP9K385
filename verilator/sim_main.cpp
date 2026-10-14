@@ -14,6 +14,7 @@
 //   --hil-trace FILE   one line per 8042 instruction: cycle pc a
 //   --mlc-trace FILE   HIL link controller writes, reads and loop frames
 //   --disk0 FILE / --disk1 FILE   SCSI disk images (IDs 0 / 1); writes go back to the file
+//   --cd FILE          CD-ROM image on ID 2: flat 2048-byte sectors (an .iso), read-only
 //   --key CYC:CODE     at clock CYC send HIL keycode CODE (hex; bit 0 = release); repeatable
 //   --ram-mb N         main RAM size, power of two, 1..128 (default 8)
 //   --cycles N         stop after N clocks (default 50,000,000)
@@ -130,7 +131,7 @@ struct Disk {
 	FILE *f = nullptr;
 	uint64_t size = 0;
 };
-static Disk disks[2];
+static Disk disks[3];
 static int blk_disk = -1;            // disk being served
 static int blk_phase = 0;            // 0 idle, 1 latency, 2 streaming, 3 done
 static int blk_wait = 0, blk_word = 0;
@@ -141,11 +142,12 @@ static void disk_service() {
 	top->sd_buff_wr = 0;
 	switch (blk_phase) {
 	case 0:
-		for (int d = 0; d < 2; d++) {
+		for (int d = 0; d < 3; d++) {
 			bool rd = (top->sd_rd >> d) & 1, wr = (top->sd_wr >> d) & 1;
 			if (!rd && !wr) continue;
 			blk_disk = d; blk_write = wr; blk_wait = 64; blk_phase = 1; blk_word = 0;
-			uint32_t lba = d ? (uint32_t)(top->sd_lba >> 32) : (uint32_t)top->sd_lba;
+			uint32_t lba = top->sd_lba[d];
+			printf("[DISK%d] %s lba %u @%llu\n", d, wr ? "write" : "read", lba, (unsigned long long)cycle);
 			memset(blk_buf, 0, 512);
 			if (disks[d].f) {
 				fseeko(disks[d].f, (off_t)lba * 512, SEEK_SET);
@@ -167,7 +169,7 @@ static void disk_service() {
 		} else {
 			// address now, sample the word on the next call
 			if (blk_word > 0) {
-				uint16_t w = (uint16_t)(blk_disk ? (top->sd_buff_din >> 16) : top->sd_buff_din);
+				uint16_t w = (uint16_t)(top->sd_buff_din >> (16 * blk_disk));
 				blk_buf[2 * (blk_word - 1)] = w & 0xFF; blk_buf[2 * (blk_word - 1) + 1] = w >> 8;
 			}
 			if (blk_word == 256) {
@@ -235,7 +237,7 @@ int main(int argc, char **argv) {
 	const char *rom_path = nullptr, *card_path = nullptr, *log_path = nullptr;
 	const char *pct_path = nullptr, *fst_path = nullptr, *snap_path = nullptr;
 	const char *hil_path = nullptr, *hilt_path = nullptr, *mlct_path = nullptr;
-	const char *disk_path[2] = {nullptr, nullptr};
+	const char *disk_path[3] = {nullptr, nullptr, nullptr};
 	uint64_t snap_every = 0;
 	bool rom_le = false;
 	unsigned ram_mb = 8;
@@ -259,6 +261,7 @@ int main(int argc, char **argv) {
 		else if (a == "--mlc-trace") mlct_path = next();
 		else if (a == "--disk0") disk_path[0] = next();
 		else if (a == "--disk1") disk_path[1] = next();
+		else if (a == "--cd") disk_path[2] = next();
 		else if (a == "--ram-mb") ram_mb = strtoul(next(), nullptr, 0);
 		else if (a == "--cycles") max_cycles = strtoull(next(), nullptr, 0);
 		else if (a == "--log") log_path = next();
@@ -301,9 +304,9 @@ int main(int argc, char **argv) {
 	ram_base = (uint32_t)(0x100000000ull - ((uint64_t)ram_mb << 20));
 	unsigned lg = __builtin_ctz(ram_mb);
 
-	for (int d = 0; d < 2; d++) {
+	for (int d = 0; d < 3; d++) {
 		if (!disk_path[d]) continue;
-		disks[d].f = fopen(disk_path[d], "r+b");
+		disks[d].f = fopen(disk_path[d], d == 2 ? "rb" : "r+b");
 		if (!disks[d].f) { perror(disk_path[d]); return 1; }
 		fseeko(disks[d].f, 0, SEEK_END);
 		disks[d].size = ftello(disks[d].f);
@@ -362,7 +365,7 @@ int main(int argc, char **argv) {
 		if (cycle == reset_clks + 16) top->rtc_set[2] = 1;     // bit 64: "RTC updated"
 		// mount the images: a one-clock pulse per disk with its size
 		top->img_mounted = 0;
-		for (int d = 0; d < 2; d++)
+		for (int d = 0; d < 3; d++)
 			if (disks[d].f && cycle == reset_clks + 20 + d) { top->img_mounted = 1 << d; top->img_size = disks[d].size; }
 		top->hil_key_stb = 0;
 		for (auto &k : keys)

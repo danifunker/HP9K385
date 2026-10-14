@@ -72,18 +72,19 @@ module hp385_top
 	input signed [8:0] hil_mouse_dy,     // up positive
 	input       [2:0] hil_mouse_btn,     // {middle, right, left}
 
-	// SCSI disks, IDs 0 and 1 (MiSTer hps_io block interface, WIDE)
-	input       [1:0] img_mounted,
+	// SCSI targets: disks on IDs 0 and 1, CD-ROM on ID 2 (MiSTer hps_io
+	// block interface, WIDE), packed {CD, disk 1, disk 0}
+	input       [2:0] img_mounted,
 	input      [63:0] img_size,
 	input             img_readonly,
-	output     [63:0] sd_lba,             // {disk 1, disk 0}
-	output      [1:0] sd_rd,
-	output      [1:0] sd_wr,
-	input       [1:0] sd_ack,
+	output     [95:0] sd_lba,
+	output      [2:0] sd_rd,
+	output      [2:0] sd_wr,
+	input       [2:0] sd_ack,
 	input       [7:0] sd_buff_addr,
 	input      [15:0] sd_buff_dout,
 	input             sd_buff_wr,
-	output     [31:0] sd_buff_din,        // {disk 1, disk 0}
+	output     [47:0] sd_buff_din,
 
 	// 8042 firmware load (2 KB, 1820-4784)
 	input             hil_rom_wr,
