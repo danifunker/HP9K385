@@ -10,6 +10,8 @@
 //   --rom FILE         boot ROM, big-endian CPU view (docs/ROMS.md)
 //   --rom-le           the ROM file is MAME's little-endian word order
 //   --card-rom FILE    98550A card ROM (byte stream); absent = 0xFF
+//   --hil-rom FILE     8042 firmware 1820-4784 (2 KB); absent = the 8042 runs NOPs
+//   --hil-trace FILE   one line per 8042 instruction: cycle pc a
 //   --ram-mb N         main RAM size, power of two, 1..128 (default 8)
 //   --cycles N         stop after N clocks (default 50,000,000)
 //   --patch OFF=VAL    sim-only ROM patch: 16-bit VAL at even byte OFF (hex);
@@ -38,6 +40,7 @@
 
 #define CORE(sig) (top->rootp->hp385_top__DOT__cpu__DOT__core__DOT__##sig)
 #define CATS(sig) (top->rootp->hp385_top__DOT__catseye__DOT__##sig)
+#define UPI(sig) (top->rootp->hp385_top__DOT__hil__DOT__cpu__DOT__##sig)
 #define TOP(sig) (top->rootp->hp385_top__DOT__##sig)
 #define NEREID(sig) (top->rootp->hp385_top__DOT__nereid__DOT__##sig)
 
@@ -46,6 +49,7 @@ static uint64_t cycle;
 
 static std::vector<uint8_t> rom(128 * 1024, 0xFF);
 static std::vector<uint8_t> card(32 * 1024, 0xFF);
+static std::vector<uint8_t> hilrom(2048, 0x00);
 static std::vector<uint8_t> ram;
 static std::vector<uint8_t> vram(4 << 20, 0);   // 98550A: video bank, overlay bank
 static uint32_t ram_base;
@@ -163,6 +167,7 @@ int main(int argc, char **argv) {
 	Verilated::commandArgs(argc, argv);
 	const char *rom_path = nullptr, *card_path = nullptr, *log_path = nullptr;
 	const char *pct_path = nullptr, *fst_path = nullptr, *snap_path = nullptr;
+	const char *hil_path = nullptr, *hilt_path = nullptr;
 	uint64_t snap_every = 0;
 	bool rom_le = false;
 	unsigned ram_mb = 8;
@@ -180,6 +185,8 @@ int main(int argc, char **argv) {
 		if (a == "--rom") rom_path = next();
 		else if (a == "--rom-le") rom_le = true;
 		else if (a == "--card-rom") card_path = next();
+		else if (a == "--hil-rom") hil_path = next();
+		else if (a == "--hil-trace") hilt_path = next();
 		else if (a == "--ram-mb") ram_mb = strtoul(next(), nullptr, 0);
 		else if (a == "--cycles") max_cycles = strtoull(next(), nullptr, 0);
 		else if (a == "--log") log_path = next();
@@ -205,6 +212,7 @@ int main(int argc, char **argv) {
 	if (!rom_path) { fprintf(stderr, "--rom is required\n"); return 2; }
 	if (!load(rom_path, rom, rom_le)) return 1;
 	if (card_path && !load(card_path, card, false)) return 1;
+	if (hil_path && !load(hil_path, hilrom, false)) return 1;
 	for (auto &p : patches) {
 		if (p.first + 1 >= rom.size() || (p.first & 1)) { fprintf(stderr, "bad patch offset %x\n", p.first); return 2; }
 		rom[p.first] = p.second >> 8; rom[p.first + 1] = p.second & 0xFF;
@@ -217,6 +225,7 @@ int main(int argc, char **argv) {
 
 	FILE *log = log_path ? fopen(log_path, "w") : stdout;
 	FILE *pct = pct_path ? fopen(pct_path, "w") : nullptr;
+	FILE *hilt = hilt_path ? fopen(hilt_path, "w") : nullptr;
 	if (!log || (pct_path && !pct)) { perror("log"); return 1; }
 
 	top = new Vhp385_top;
@@ -243,8 +252,13 @@ int main(int argc, char **argv) {
 	bool gfx_warned = false;      // clocks until the pending exception is logged
 	const char *stop_reason = "cycle limit";
 
+	// reset: the first 2048 clocks also load the 8042 firmware
+	const uint64_t reset_clks = 2048 + 16;
 	for (cycle = 0; cycle < max_cycles; cycle++) {
-		if (cycle == 16) top->reset = 0;
+		if (cycle < 2048) {
+			top->hil_rom_wr = 1; top->hil_rom_addr = cycle; top->hil_rom_data = hilrom[cycle];
+		} else top->hil_rom_wr = 0;
+		if (cycle == reset_clks) top->reset = 0;
 		top->clk = 1;
 		top->eval();
 		mem_service();       // sample the outputs of this edge, answer for the next
@@ -264,6 +278,9 @@ int main(int argc, char **argv) {
 			       top->vram_addr << 2, top->vram_we, vram_wait, CATS(es), (unsigned long long)cycle);
 
 		uint32_t pc = CORE(pc_i);
+
+		if (hilt && UPI(dbg_dispatch))
+			fprintf(hilt, "%llu %03X %02X\n", (unsigned long long)cycle, UPI(dbg_pc), UPI(a));
 
 		bool toggle = CORE(perf_dispatch_toggle);
 		if (toggle != last_toggle) {
@@ -358,6 +375,7 @@ int main(int argc, char **argv) {
 	if (snap_path) { snapshot(snap_path); printf("[SIM] screen -> %s\n", snap_path); }
 	if (fst) { fst->close(); delete fst; }
 	if (pct) fclose(pct);
+	if (hilt) fclose(hilt);
 	if (log != stdout) fclose(log);
 	top->final();
 	delete top;

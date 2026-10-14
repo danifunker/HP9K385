@@ -9,7 +9,7 @@
 //
 //  Memory map (docs/PLAN_385.md §1):
 //    $00000000-$0001FFFF  boot ROM (mem port, sel 0); write $1FFFC = LEDs
-//    $00420000-$0042FFFF  8042 HIL controller          (stub)
+//    $00420000-$0042FFFF  8042 HIL controller (hil_card.sv), IRQ 1 / NMI 7
 //    $00470000-$0047FFFF  built-in HP-IB + status      (stub)
 //    $00200000-$003FFFFF  98550A VRAM through the Catseye (vr_* port)
 //    $00560000-$0056FFFF  98550A: card ROM on odd bytes (mem port, sel 2),
@@ -57,6 +57,11 @@ module hp385_top
 	input      [31:0] mem_rdata,
 
 	output reg  [7:0] leds,
+
+	// 8042 firmware load (2 KB, 1820-4784)
+	input             hil_rom_wr,
+	input      [10:0] hil_rom_addr,
+	input       [7:0] hil_rom_data,
 
 	// 98550A VRAM: 2 banks x 2 MB, longword address {bank, y[9:0], x[10:2]}
 	output            vram_req,
@@ -213,7 +218,7 @@ reg         svc_write;
 reg  [31:0] svc_wdata;
 reg  [2:0]  svc_fc;
 reg         svc_card_odd;         // card ROM: odd beat takes the low half
-reg   [1:0] svc_dev;              // 8-bit device being served
+reg   [2:0] svc_dev;              // 8-bit device being served
 reg   [1:0] io_pend;              // odd lanes still to do: [1] = +1, [0] = +3
 reg  [31:0] io_rdata;
 reg         walker_armed;
@@ -239,10 +244,11 @@ localparam R_IO8  = 3'd5;   // modelled 8-bit odd-byte device (d_dev)
 localparam R_IO16 = 3'd6;   // modelled 16-bit device (d_dev)
 localparam R_VRAM = 3'd7;   // 98550A frame buffer through the Catseye
 
-localparam DEV_PTM     = 2'd0;
-localparam DEV_CATSEYE = 2'd1;   // io16
-localparam DEV_NEREID  = 2'd2;   // io16
-localparam DEV_CARD    = 2'd3;   // io8: 98550A reset/ID and interrupt register
+localparam DEV_PTM     = 3'd0;
+localparam DEV_CATSEYE = 3'd1;   // io16
+localparam DEV_NEREID  = 3'd2;   // io16
+localparam DEV_CARD    = 3'd3;   // io8: 98550A reset/ID and interrupt register
+localparam DEV_HIL     = 3'd4;   // io8: 8042 data / command-status
 
 function [31:0] stub_rdata;   // idle read value of a stub device longword
 	input [31:2] a;
@@ -265,13 +271,15 @@ reg  [2:0]  d_region;
 reg  [1:0]  d_sel;
 reg  [31:2] d_maddr;
 reg  [31:0] d_stub;
-reg   [1:0] d_dev;
+reg   [2:0] d_dev;
 
 always @(*) begin
 	d_region = R_BERR;
 	d_sel    = 2'd0;
 	d_maddr  = s_addr;
 	d_stub   = stub_rdata(s_addr);
+	// $470005 bit 2: keyboard NMI status (KBDNMIST, also $478005 by mirror)
+	if (s_la[31:16] == 16'h0047 && s_la[4:2] == 3'd1 && hil_nmi) d_stub = d_stub | 32'h0004_0000;
 	d_dev    = DEV_PTM;
 	if (s_la[31:17] == 15'd0) begin
 		if (s_write) d_region = R_ROMW;
@@ -287,8 +295,9 @@ always @(*) begin
 	else if (s_la[31:4] == 28'h005F800) begin  // MC6840 PTM
 		d_region = R_IO8; d_dev = DEV_PTM;
 	end
-	else if (s_la[31:16] == 16'h0042)          // 8042
-		d_region = R_STUB;
+	else if (s_la[31:16] == 16'h0042) begin    // 8042 (mirrored)
+		d_region = R_IO8; d_dev = DEV_HIL;
+	end
 	else if (s_la[31:16] == 16'h0047)          // HP-IB
 		d_region = R_STUB;
 	else if (s_la[31:16] == 16'h0056) begin    // 98550A
@@ -355,7 +364,29 @@ always @(posedge clk) begin
 	end
 end
 
-wire  [7:0] io8_rdata = (svc_dev == DEV_CARD) ? card_dout : ptm_dout;
+// human interface: 8042 + HIL link + RTC + beeper
+wire  [7:0] hil_dout;
+wire        hil_irq1, hil_nmi;
+
+hil_card hil (
+	.clk(clk),
+	.reset(dio_reset),
+	.rom_wr(hil_rom_wr),
+	.rom_addr(hil_rom_addr),
+	.rom_data(hil_rom_data),
+	.host_cs(io8_cs && svc_dev == DEV_HIL),
+	.host_we(io8_we),
+	.host_a0(io8_addr[1]),
+	.host_din(io8_wdata),
+	.host_dout(hil_dout),
+	.irq1(hil_irq1),
+	.nmi(hil_nmi),
+	.dbg_pc(),
+	.dbg_dispatch()
+);
+
+wire  [7:0] io8_rdata = (svc_dev == DEV_CARD) ? card_dout :
+                        (svc_dev == DEV_HIL)  ? hil_dout  : ptm_dout;
 
 // 16-bit devices: high word half (lanes 3:2) at the beat address, then the
 // low half (lanes 1:0) at +2
@@ -419,7 +450,7 @@ nereid nereid (
 // Interrupts: all autovectored; IPL is the highest pending level
 //----------------------------------------------------------------------------
 wire        gfx_int = card_intreg[7] && gfx_irq;
-wire  [7:1] irq_lvl = {1'b0, ptm_irq, 5'b00000} |
+wire  [7:1] irq_lvl = {hil_nmi, ptm_irq, 4'b0000, hil_irq1} |
                       ((gfx_int ? 7'b0000001 : 7'b0) << (card_intreg[5:3] - 3'd1));
 always @(posedge clk)
 	if (reset) ipl_n <= 3'd7;

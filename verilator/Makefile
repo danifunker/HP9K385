@@ -10,6 +10,7 @@ AP   = ../rtl/ap68040/rtl
 
 ROM      ?= ../scratch/roms/hp9k380/bootrom_be.bin
 CARDROM  ?= ../scratch/roms/dio98550/98550a.bin
+HILROM   ?= ../scratch/roms/human_interface/1820-4784.bin
 CYCLES   ?= 50000000
 RUNARGS  ?=
 
@@ -19,6 +20,8 @@ V_SRC = \
 	$(RTL)/ptm6840.sv \
 	$(RTL)/catseye.sv \
 	$(RTL)/nereid.sv \
+	$(RTL)/upi41.sv \
+	$(RTL)/hil_card.sv \
 	$(RTL)/wombat/wombat_cpu.sv \
 	$(RTL)/wombat/wombat_store_buffer.sv \
 	$(RTL)/wombat/wombat_bus32.sv \
@@ -57,7 +60,7 @@ $(EXE): $(V_SRC) $(C_SRC) Makefile
 
 run: $(EXE)
 	@mkdir -p out
-	$(EXE) --rom $(ROM) --card-rom $(CARDROM) --cycles $(CYCLES) \
+	$(EXE) --rom $(ROM) --card-rom $(CARDROM) --hil-rom $(HILROM) --cycles $(CYCLES) \
 		--log out/events.log --pc-trace out/pc.log --snap out/screen.ppm $(RUNARGS)
 
 clean:
