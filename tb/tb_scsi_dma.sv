@@ -142,7 +142,8 @@ always @(posedge clk)
 //----------------------------------------------------------------------------
 // CPU accesses: card bytes (odd byte = reg_be[0]), SPC registers, 98620
 //----------------------------------------------------------------------------
-int acc_dly = 0;                            // extra clocks per card access
+int acc_dly = 10;                           // extra clocks per card access: the core's io16 path never
+                                             // takes fewer (the boot ROM's SPC accesses are ~70 apart)
 task automatic card_wr(input [10:1] w, input [7:0] d);
 	repeat (acc_dly) @(negedge clk);
 	@(negedge clk); c_cs = 1; c_we = 1; c_off = w; c_be = 2'b01; c_din = {8'h00, d};

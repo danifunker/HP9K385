@@ -400,8 +400,11 @@ always @(*) begin
 	S_X_RECV:
 		if (tc == 24'd0 && scmd[0])
 			go(S_X_ACK, D2, 1'b0);
-		else if (tc != 24'd0 && !ffull)
-			go(S_X_ACK, D10, 1'b0);           // the byte enters the FIFO with ACK
+		else if (tc != 24'd0 && !ffull) begin
+			push   = 1'b1;
+			push_d = bus_data;
+			go(S_X_ACK, D10, 1'b0);
+		end
 
 	S_X_SEND:
 		if (tc != 24'd0 && !fempty) begin
@@ -416,14 +419,6 @@ always @(*) begin
 		end
 
 	S_X_ACK: begin
-		// receiving: the byte goes into the FIFO only now, together with ACK.
-		// Software that has read the last byte must not find the target's
-		// REQ for it still up: NetBSD would take it for more DATA IN and
-		// restart a transfer in the middle of this handshake.
-		if (cv[0] && tc != 24'd0) begin
-			push   = 1'b1;
-			push_d = bus_data;
-		end
 		if (!scmd[0] && !cv[0]) temp_n = bus_data;
 		set_ctrl(L_ACK, L_ACK);
 		go(S_X_WNREQ, D1, 1'b0);
