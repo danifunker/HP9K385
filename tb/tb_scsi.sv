@@ -373,6 +373,18 @@ endtask
 
 // one full command; data phases by DMA (use_dma) or program transfer
 integer last_in;
+// NetBSD's mb89352 driver (sys/dev/ic/mb89352.c) reads STATUS and MESSAGE
+// IN by hand: with REQ up it reads the byte from TEMP *before* SET ACK, then
+// SET ACK, waits for REQ to drop, RESET ACK.
+bit nbsd_style = 0;
+task automatic nbsd_in(output [7:0] b);
+	reg [7:0] p;
+	rd(TEMP, b);
+	wr(SCMD, 8'hE0);                         // set ACK
+	do rd(PSNS, p); while (p[7]);
+	wr(SCMD, 8'hC0);                         // reset ACK
+endtask
+
 task automatic run_cmd(input int tgt, input bit atn, input bit arb, input int clen,
                        input bit use_dma, input int dlen, input bit manual_status,
                        output [7:0] stat);
@@ -422,7 +434,8 @@ task automatic run_cmd(input int tgt, input bit atn, input bit arb, input int cl
 			else prg_out(3'd0, dlen, 0);
 		end
 		3'd3: begin
-			if (manual_status) begin
+			if (nbsd_style) nbsd_in(stat);
+			else if (manual_status) begin
 				// manual handshake: SET ACK latches the byte into TEMP
 				wr(SCMD, 8'hE0);
 				do rd(PSNS, p); while (p[7]);
@@ -436,7 +449,16 @@ task automatic run_cmd(input int tgt, input bit atn, input bit arb, input int cl
 				stat = sbuf[0];
 			end
 		end
-		3'd7: begin
+		3'd7: if (nbsd_style) begin
+			nbsd_in(m);
+			chk(m == 8'h00, $sformatf("NetBSD-style MESSAGE IN %02x, want 00", m));
+			wait_ints(v);
+			chk(v == 8'h20, $sformatf("NetBSD-style bus free: INTS %02x, want 20", v));
+			clr_ints(v);
+			wr(PCTL, 8'h00);
+			done = 1;
+		end
+		else begin
 			prg_in(3'd7, 1, 0, got, v);
 			chk(got == 1 && v == 8'h10, $sformatf("MESSAGE IN: %0d bytes, INTS %02x", got, v));
 			chk(sbuf[0] == 8'h00, $sformatf("MESSAGE IN %02x, want 00", sbuf[0]));
@@ -630,6 +652,18 @@ initial begin
 	chk(st == 8'h00, $sformatf("TEST UNIT READY status %02x", st));
 	$display("TEST UNIT READY ok");
 
+	// ---- NetBSD-style STATUS / MESSAGE IN (TEMP read before SET ACK) ----
+	nbsd_style = 1;
+	set_cdb6(8'h00, 0, 0, 0, 0, 0);
+	run_cmd(0, 0, 1, 6, 0, 0, 0, st);
+	chk(st == 8'h00, $sformatf("NetBSD-style TEST UNIT READY status %02x, want 00", st));
+	set_cdb6(8'h12, 0, 0, 0, 36, 0);
+	run_cmd(0, 0, 1, 6, 0, 36, 0, st);
+	chk(st == 8'h00 && last_in == 36 && dbuf[0] == 8'h00,
+	    $sformatf("NetBSD-style INQUIRY: status %02x, %0d bytes, type %02x", st, last_in, dbuf[0]));
+	nbsd_style = 0;
+	$display("NetBSD-style status/message ok");
+
 	// ---- READ CAPACITY ----
 	set_cdb10(8'h25, 0, 0);
 	run_cmd(0, 1, 1, 10, 0, 8, 0, st);
@@ -721,6 +755,13 @@ initial begin
 	run_cmd(3, 1, 0, 6, 0, 36, 0, st);
 	chk(st == 8'h00 && last_in == 36 && dbuf[0] == 8'h00, "ID 3 INQUIRY");
 	$display("ID 3 (no image) ok");
+
+	// NetBSD-style status read must see CHECK CONDITION (02), not a stale 00
+	nbsd_style = 1;
+	set_cdb6(8'h00, 0, 0, 0, 0, 0);
+	run_cmd(3, 0, 1, 6, 0, 0, 0, st);
+	chk(st == 8'h02, $sformatf("NetBSD-style TUR on ID 3 (no image): status %02x, want 02", st));
+	nbsd_style = 0;
 
 	// ---- ID 2: CD-ROM ----
 	set_cdb6(8'h00, 0, 0, 0, 0, 0);

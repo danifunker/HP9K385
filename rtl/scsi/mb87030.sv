@@ -278,6 +278,12 @@ always @(*) begin
 	state_n = state; dstate_n = dstate; dly_n = dly;
 	to_run_n = to_run; to_cnt_n = to_cnt;
 	bf_cnt_n = bf_cnt;
+
+	// TEMP follows the data bus while the target offers a byte in an input
+	// phase (initiator, I/O and REQ up, ACK not yet): NetBSD's mb89352 driver
+	// reads STATUS and MESSAGE IN bytes from TEMP before it sets ACK.  (MAME
+	// only latches TEMP on SET ACK, which leaves such reads one byte behind.)
+	if (init_conn && cv[0] && cv[5] && !cv[6]) temp_n = bus_data;
 	push = 1'b0; push_d = 8'h00; pop = 1'b0; fclr = 1'b0;
 	term = 1'b0; tc_dec = tc;
 
