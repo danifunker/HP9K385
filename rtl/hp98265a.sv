@@ -1,9 +1,9 @@
 //============================================================================
 //  hp98265a — HP 98265A SCSI interface (select code 14, $6E0000) with its
 //  MB87030 SPC, two SCSI disks (IDs 0 and 1) and a CD-ROM (ID 2) on the
-//  card's bus.
+//  card's bus, the three served by one shared target engine.
 //  Card registers from MAME bus/hp_dio/hp98265a.cpp; the SPC and the disks
-//  are rtl/scsi/ (docs/reference/scsi.md).
+//  are rtl/scsi/ (mb87030.sv, scsi_target.sv; docs/reference/scsi.md).
 //
 //  Registers (16-bit words at the card base; byte offset in reg_off):
 //    +0  read $0007 (ID) / write: card reset (SPC reset pulse)
@@ -64,11 +64,11 @@ wire [7:0] spc_dout;
 wire       spc_irq, spc_dreq;
 wire [7:0] spc_dack_dout;
 
-// ---- the SCSI bus: three devices, wired-OR ----
-wire [7:0] d_spc, d_0, d_1, d_2;
-wire [8:0] c_spc, c_0, c_1, c_2;           // {rst, atn, sel, bsy, ack, req, msg, cd, io}
-wire [7:0] bus_d = d_spc | d_0 | d_1 | d_2;
-wire [8:0] bus_c = c_spc | c_0 | c_1 | c_2;
+// ---- the SCSI bus: the SPC and the targets, wired-OR ----
+wire [7:0] d_spc, d_tgt;
+wire [8:0] c_spc, c_tgt;                   // {rst, atn, sel, bsy, ack, req, msg, cd, io}
+wire [7:0] bus_d = d_spc | d_tgt;
+wire [8:0] bus_c = c_spc | c_tgt;
 
 wire       de_ok = dack_ch ? control[1] : control[0];
 
@@ -97,35 +97,28 @@ mb87030 spc (
 	.scsi_ack_i(bus_c[4]), .scsi_req_i(bus_c[3]), .scsi_msg_i(bus_c[2]), .scsi_cd_i(bus_c[1]), .scsi_io_i(bus_c[0])
 );
 
-genvar g;
-generate for (g = 0; g < 3; g = g + 1) begin : g_disk
-	wire [7:0] d_o;
-	wire [8:0] c_o;
-	scsi_disk #(.ID(g), .CDROM(g == 2)) disk (
-		.clk(clk),
-		.reset(reset),
-		.scsi_data_o(d_o),
-		.scsi_rst_o(c_o[8]), .scsi_atn_o(c_o[7]), .scsi_sel_o(c_o[6]), .scsi_bsy_o(c_o[5]),
-		.scsi_ack_o(c_o[4]), .scsi_req_o(c_o[3]), .scsi_msg_o(c_o[2]), .scsi_cd_o(c_o[1]), .scsi_io_o(c_o[0]),
-		.scsi_data_i(bus_d),
-		.scsi_rst_i(bus_c[8]), .scsi_atn_i(bus_c[7]), .scsi_sel_i(bus_c[6]), .scsi_bsy_i(bus_c[5]),
-		.scsi_ack_i(bus_c[4]), .scsi_req_i(bus_c[3]), .scsi_msg_i(bus_c[2]), .scsi_cd_i(bus_c[1]), .scsi_io_i(bus_c[0]),
-		.img_mounted(img_mounted[g]),
-		.img_size(img_size),
-		.img_readonly(img_readonly),
-		.sd_lba(sd_lba[g*32 +: 32]),
-		.sd_rd(sd_rd[g]),
-		.sd_wr(sd_wr[g]),
-		.sd_ack(sd_ack[g]),
-		.sd_buff_addr(sd_buff_addr),
-		.sd_buff_dout(sd_buff_dout),
-		.sd_buff_wr(sd_buff_wr && sd_ack[g]),
-		.sd_buff_din(sd_buff_din[g*16 +: 16])
-	);
-	if (g == 0)      begin : g0 assign d_0 = d_o; assign c_0 = c_o; end
-	else if (g == 1) begin : g1 assign d_1 = d_o; assign c_1 = c_o; end
-	else             begin : g2 assign d_2 = d_o; assign c_2 = c_o; end
-end endgenerate
+// IDs 0-2 behind one shared target engine; ID 2 is the CD-ROM
+scsi_target #(.UNITS(3), .CDROM(3'b100)) targets (
+	.clk(clk),
+	.reset(reset),
+	.scsi_data_o(d_tgt),
+	.scsi_rst_o(c_tgt[8]), .scsi_atn_o(c_tgt[7]), .scsi_sel_o(c_tgt[6]), .scsi_bsy_o(c_tgt[5]),
+	.scsi_ack_o(c_tgt[4]), .scsi_req_o(c_tgt[3]), .scsi_msg_o(c_tgt[2]), .scsi_cd_o(c_tgt[1]), .scsi_io_o(c_tgt[0]),
+	.scsi_data_i(bus_d),
+	.scsi_rst_i(bus_c[8]), .scsi_atn_i(bus_c[7]), .scsi_sel_i(bus_c[6]), .scsi_bsy_i(bus_c[5]),
+	.scsi_ack_i(bus_c[4]), .scsi_req_i(bus_c[3]), .scsi_msg_i(bus_c[2]), .scsi_cd_i(bus_c[1]), .scsi_io_i(bus_c[0]),
+	.img_mounted(img_mounted),
+	.img_size(img_size),
+	.img_readonly(img_readonly),
+	.sd_lba(sd_lba),
+	.sd_rd(sd_rd),
+	.sd_wr(sd_wr),
+	.sd_ack(sd_ack),
+	.sd_buff_addr(sd_buff_addr),
+	.sd_buff_dout(sd_buff_dout),
+	.sd_buff_wr(sd_buff_wr),                // qualified inside by the connected unit's sd_ack
+	.sd_buff_din(sd_buff_din)
+);
 
 assign irq        = control[7] && spc_irq;
 assign dmar       = {control[1] && spc_dreq, control[0] && spc_dreq};

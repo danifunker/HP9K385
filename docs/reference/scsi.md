@@ -2,7 +2,7 @@
 
 RTL:
 - `rtl/scsi/mb87030.sv` is the Fujitsu MB87030 SPC. It only plays the initiator role.
-- `rtl/scsi/scsi_disk.sv` is a SCSI disk target that is backed by a MiSTer block device. With `CDROM = 1` it is a CD-ROM instead (see "CD-ROM personality" below).
+- `rtl/scsi/scsi_target.sv` is the SCSI target side: `UNITS` direct-access units on IDs 0 to `UNITS-1`, each backed by its own MiSTer block device, served by **one shared protocol engine**. A unit whose bit is set in the `CDROM` mask is a CD-ROM instead of a disk (see "CD-ROM personality" below). The 98265A uses `UNITS = 3`, `CDROM = 3'b100`.
 
 Bench: `tb/tb_scsi.sv`.
 
@@ -161,7 +161,21 @@ These are the same as in MAME:
 - MBC
 - the MB89351/2 interrupt-driven program transfer (SERR XFER_OUT)
 
-## scsi_disk
+## scsi_target
+
+### One engine, several units
+
+Only one target can be connected at a time, so one state machine, CDB, set of counters and one 512-byte sector buffer serve every unit. The engine answers a selection carrying the ID bit of any of its units (an ID without an image answers too, and gets NOT READY; an ID at or above `UNITS` does not answer, so the initiator sees a selection time-out). The unit that won the selection is `cur`, and everything below applies to it, as if each unit were its own target.
+
+Kept per unit, because it outlives a connection:
+- the image: mounted, read-only, size in blocks (latched on that unit's `img_mounted` bit);
+- the pending sense key and ASC, until REQUEST SENSE on that unit or its next command;
+- the request lines `sd_rd` / `sd_wr` to its hps_io slot;
+- CD-ROM units only: the unit attention after a mount, the 2048-byte block mode and the lead-out MSF.
+
+Shared: the phase state machine, the CDB, IDENTIFY state, transfer length / position / LBA / block count, the MODE SELECT parameter bytes being received, REQUEST SENSE's output latch, and the sector buffer. `sd_lba` is one register shown on every slot, and `sd_buff_din` is the one buffer shown on every slot; hps_io only looks at the slot whose request it is serving.
+
+A block request waits until no unit has one outstanding (`sd_rd`, `sd_wr` or `sd_ack` on any slot), so `sd_lba` never moves under a request, and the buffer takes `sd_buff_wr` / follows `sd_buff_addr` only for the connected unit's `sd_ack`.
 
 ### Target state machine
 
@@ -256,7 +270,7 @@ The mount state starts at zero and **is not cleared by `reset`**, because the HP
 
 ### CD-ROM personality (`CDROM = 1`)
 
-The parameter is `scsi_disk #(.ID(n), .CDROM(1))`. The port list is the same, and `CDROM = 0` (the default) behaves as described above. The model is an HP-300-era SCSI CD-ROM such as the Toshiba XM-3301 or Sony CDU-561.
+The CD-ROM behaviour applies to the units whose bit is set in `scsi_target #(.CDROM(mask))`; the others behave as described above. The model is an HP-300-era SCSI CD-ROM such as the Toshiba XM-3301 or Sony CDU-561.
 
 **Image.** The image is a flat run of 2048-byte data sectors, which is how MiSTer's Main presents CUE and CHD images. The block side still moves 512-byte host blocks: CD sector N is host blocks 4N to 4N+3.
 
@@ -336,10 +350,11 @@ Each part of the card connects to the SPC as follows:
 
 ## Bench
 
-`tb/tb_scsi.sv` puts one SPC and three targets on the bus:
+`tb/tb_scsi.sv` puts one SPC and one `scsi_target` with four units (`UNITS = 4`, `CDROM = 4'b0100`) on the bus. Each unit has its own block-device model on a shared `sd_buff_*` bus that is muxed by `sd_ack`, as hps_io does:
 - disk 0 has a 64-block image behind an hps_io-timed block-device model, which checks that `sd_rd`/`sd_wr` are held until `sd_ack` and dropped after it;
+- disk 1 has a 16-block image (`tb_blkdev`, the same model packaged as a module), mounted part-way through, first read-only and then writable;
+- ID 2 is a CD-ROM with an 8-sector image, also on a `tb_blkdev`;
 - disk 3 has no image;
-- ID 2 is a CD-ROM with an 8-sector image, served by `tb_blkdev`, the same model packaged as a module;
 - ID 5 is absent.
 
 A NetBSD-style register driver then runs:
@@ -364,6 +379,16 @@ A NetBSD-style register driver then runs:
   - READ TOC in LBA and MSF form, from AAh, with a short allocation length, and with track 2 → ILLEGAL REQUEST/24;
   - READ SUB-CHANNEL;
   - MODE SELECT 1024 → ILLEGAL REQUEST/26, then back to 512 with READ CAPACITY and the READ TOC lead-out checked;
+- several units at once:
+  - ID 1 before its mount: NOT READY/3A, with ID 0 commands in between;
+  - after the ID 1 mount: no unit attention on ID 1 or on the CD, INQUIRY and READ CAPACITY on every unit (type, product and size are the unit's own), and the CD's MSF lead-out is unchanged;
+  - READ(10)s alternating between ID 0, ID 1 and the CD, each checked against its own image;
+  - read-only per unit: WRITE on read-only ID 1 → DATA PROTECT and WP in MODE SENSE, WRITE on ID 0 → GOOD, ID 1's image untouched;
+  - sense per unit: CHECK CONDITION on ID 0, ID 1, the CD and ID 3, other units' commands in between, then REQUEST SENSE on each returns its own sense, once;
+  - block length per unit: MODE SELECT 2048 on the CD and on ID 0, READ CAPACITY on all three, then 2048-byte CD reads interleaved with disk reads, and READ TOC (a disk refuses it);
+  - a writable remount of ID 1 leaves the CD at 2048 without unit attention, then a WRITE(10) to ID 1 lands only in ID 1's image;
+  - a CD remount with a larger image: unit attention on the CD only, back to 512, a new MSF lead-out (02:15:25);
+  - SCSI RST (SCMD bit 4) while ID 0 waits 20,000 clocks for its block: ID 0's request stays up until it is taken, and ID 1's next read waits for that block to finish before it raises its own request;
 - on ID 5: selection time-out (INTS 0x04), then termination and recovery.
 
 Along the way it checks:
@@ -372,7 +397,7 @@ Along the way it checks:
 - that ACK is held on the last MESSAGE IN byte;
 - the bus-free interrupt (INTS 0x20);
 - that no two devices drive the same data bit;
-- that the CD-ROM never issues a block write.
+- that the CD-ROM never issues a block write, ID 3 never issues a request, and no two slots have a request or acknowledge up at once.
 
 The bench was mutation-checked; each of these mutations makes it fail:
 - SPC side: no same-cycle dack correction, no `inflight` term in `dreq`, ACK not held on MESSAGE IN, ATN not dropped, no phase check, TC not cleared on time-out;
@@ -380,9 +405,11 @@ The bench was mutation-checked; each of these mutations makes it fail:
 - disk side: wrong sense key;
 - CD side: no unit attention, no ×4 LBA conversion at 2048, no 150-frame pregap in MSF, no RMB bit, MODE SELECT accepting 1024, CD writable, READ CAPACITY block length stuck at 512.
 
+The shared engine (2026-10-14) was mutation-checked as well; each of these makes the bench fail: sense in one shared slot, the read or the write request raised on unit 0's line whatever the unit, the CD flag applied to every unit, the buffer following unit 0's `sd_ack`, the image size, read-only or mounted state taken from unit 0 / any unit, unit attention and block length reset by any unit's mount, MODE SELECT changing a disk's block length, `cur` not latched at selection, the MSF recomputed on any mount, the unit attention cleared on the wrong unit, an absent ID answering selection, and the request interlock checking only the connected unit.
+
 Run it with:
 
 ```
 verilator --binary --timing -Wno-fatal -Wno-WIDTH --top-module tb_scsi --Mdir build/obj_tb_scsi -o tb \
-    tb/tb_scsi.sv rtl/scsi/mb87030.sv rtl/scsi/scsi_disk.sv && build/obj_tb_scsi/tb
+    tb/tb_scsi.sv rtl/scsi/mb87030.sv rtl/scsi/scsi_target.sv && build/obj_tb_scsi/tb
 ```

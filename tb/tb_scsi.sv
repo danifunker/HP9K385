@@ -1,18 +1,24 @@
 //============================================================================
-//  tb_scsi — mb87030 SPC (initiator, ID 7) + two scsi_disk targets on one
-//  wired-OR bus.  Disk ID 0 has a 64-block image served by a behavioural
-//  hps_io block-device model; disk ID 3 has no image; ID 5 is absent.
-//
-//  Disk ID 2 is a CD-ROM (CDROM=1) with an 8-sector (2048-byte) image,
-//  mounted part-way through the test.
+//  tb_scsi — mb87030 SPC (initiator, ID 7) + one scsi_target serving four
+//  units (IDs 0-3) on one wired-OR bus, each unit with its own hps_io-timed
+//  block-device model on a shared sd_buff_* bus muxed by sd_ack the way
+//  hps_io does it.
+//    ID 0  disk, 64-block image (mounted at the start)
+//    ID 1  disk, 16-block image (mounted part-way through, once read-only)
+//    ID 2  CD-ROM (CDROM bit 2) with an 8-sector (2048-byte) image, mounted
+//          part-way through
+//    ID 3  disk, never mounted
+//    ID 5  absent (selection time-out)
 //
 //  A behavioural "CPU" drives the SPC registers the way NetBSD's spc driver
 //  does (select with ATN + IDENTIFY, phase-driven program transfers, DMA
 //  transfers through dreq / dack, MESSAGE IN with ACK held, bus-free
-//  interrupt), and checks INTS, SSTS, PSNS, status and message bytes.
+//  interrupt), and checks INTS, SSTS, PSNS, status and message bytes.  The
+//  last part alternates commands between the units and checks that the
+//  image, sense, unit attention and block length stay with their unit.
 //
 //  Build:  verilator --binary --timing -Wno-fatal -Wno-WIDTH --top-module tb_scsi
-//          tb/tb_scsi.sv rtl/scsi/mb87030.sv rtl/scsi/scsi_disk.sv
+//          tb/tb_scsi.sv rtl/scsi/mb87030.sv rtl/scsi/scsi_target.sv
 //============================================================================
 
 `timescale 1ns/1ps
@@ -41,10 +47,10 @@ endtask
 //----------------------------------------------------------------------------
 // the bus: [0] I/O [1] C/D [2] MSG [3] BSY [4] SEL [5] REQ [6] ACK [7] ATN [8] RST
 //----------------------------------------------------------------------------
-wire [8:0] c_spc, c_d0, c_d3, c_cd;
-wire [7:0] d_spc, d_d0, d_d3, d_cd;
-wire [8:0] bc = c_spc | c_d0 | c_d3 | c_cd;
-wire [7:0] bd = d_spc | d_d0 | d_d3 | d_cd;
+wire [8:0] c_spc, c_t;
+wire [7:0] d_spc, d_t;
+wire [8:0] bc = c_spc | c_t;
+wire [7:0] bd = d_spc | d_t;
 
 // SPC host side
 reg        cs = 0, we = 0;
@@ -73,104 +79,95 @@ mb87030 spc
 	.scsi_req_i(bc[5]), .scsi_msg_i(bc[2]), .scsi_cd_i(bc[1]), .scsi_io_i(bc[0])
 );
 
-// disk 0, with an image
-reg         img_mounted0 = 0;
-reg  [63:0] img_size0 = 0;
-reg         img_ro0 = 0;
-wire [31:0] sd_lba0;
-wire        sd_rd0, sd_wr0;
+// the targets: IDs 0-3, ID 2 a CD-ROM
+reg   [3:0] img_mounted = 0;
+reg  [63:0] img_size = 0;                   // shared, as in hps_io
+reg         img_ro = 0;
+wire [127:0] t_lba;
+wire  [3:0] t_rd, t_wr, t_ack;
+wire  [7:0] t_baddr;
+wire [15:0] t_bdout;
+wire        t_bwr;
+wire [63:0] t_bdin;
+
+scsi_target #(.UNITS(4), .CDROM(4'b0100)) tgt
+(
+	.clk(clk), .reset(reset),
+	.scsi_data_o(d_t),
+	.scsi_bsy_o(c_t[3]), .scsi_sel_o(c_t[4]), .scsi_atn_o(c_t[7]), .scsi_ack_o(c_t[6]),
+	.scsi_rst_o(c_t[8]), .scsi_req_o(c_t[5]), .scsi_msg_o(c_t[2]), .scsi_cd_o(c_t[1]),
+	.scsi_io_o(c_t[0]),
+	.scsi_data_i(bd),
+	.scsi_bsy_i(bc[3]), .scsi_sel_i(bc[4]), .scsi_atn_i(bc[7]), .scsi_ack_i(bc[6]), .scsi_rst_i(bc[8]),
+	.scsi_req_i(bc[5]), .scsi_msg_i(bc[2]), .scsi_cd_i(bc[1]), .scsi_io_i(bc[0]),
+	.img_mounted(img_mounted), .img_size(img_size), .img_readonly(img_ro),
+	.sd_lba(t_lba), .sd_rd(t_rd), .sd_wr(t_wr), .sd_ack(t_ack),
+	.sd_buff_addr(t_baddr), .sd_buff_dout(t_bdout), .sd_buff_wr(t_bwr),
+	.sd_buff_din(t_bdin)
+);
+
+task automatic mount(input int u, input longint size, input bit ro);
+	@(negedge clk); img_size = size; img_ro = ro; img_mounted[u] = 1;
+	@(negedge clk); img_mounted = 0;
+endtask
+
+// disk 0: the model below
+wire [31:0] sd_lba0 = t_lba[31:0];
+wire        sd_rd0 = t_rd[0], sd_wr0 = t_wr[0];
 reg         sd_ack0 = 0;
 reg   [7:0] sd_buff_addr0 = 0;
 reg  [15:0] sd_buff_dout0 = 0;
 reg         sd_buff_wr0 = 0;
-wire [15:0] sd_buff_din0;
+wire [15:0] sd_buff_din0 = t_bdin[15:0];
 
-scsi_disk #(.ID(3'd0)) disk0
+// disk 1
+localparam D1_BLK = 16;
+wire        d1_ack, d1_bwr;
+wire  [7:0] d1_baddr;
+wire [15:0] d1_bdout;
+
+tb_blkdev #(.NBLK(D1_BLK)) d1_dev
 (
 	.clk(clk), .reset(reset),
-	.scsi_data_o(d_d0),
-	.scsi_bsy_o(c_d0[3]), .scsi_sel_o(c_d0[4]), .scsi_atn_o(c_d0[7]), .scsi_ack_o(c_d0[6]),
-	.scsi_rst_o(c_d0[8]), .scsi_req_o(c_d0[5]), .scsi_msg_o(c_d0[2]), .scsi_cd_o(c_d0[1]),
-	.scsi_io_o(c_d0[0]),
-	.scsi_data_i(bd),
-	.scsi_bsy_i(bc[3]), .scsi_sel_i(bc[4]), .scsi_atn_i(bc[7]), .scsi_ack_i(bc[6]), .scsi_rst_i(bc[8]),
-	.scsi_req_i(bc[5]), .scsi_msg_i(bc[2]), .scsi_cd_i(bc[1]), .scsi_io_i(bc[0]),
-	.img_mounted(img_mounted0), .img_size(img_size0), .img_readonly(img_ro0),
-	.sd_lba(sd_lba0), .sd_rd(sd_rd0), .sd_wr(sd_wr0), .sd_ack(sd_ack0),
-	.sd_buff_addr(sd_buff_addr0), .sd_buff_dout(sd_buff_dout0), .sd_buff_wr(sd_buff_wr0),
-	.sd_buff_din(sd_buff_din0)
+	.sd_lba(t_lba[63:32]), .sd_rd(t_rd[1]), .sd_wr(t_wr[1]), .sd_ack(d1_ack),
+	.sd_buff_addr(d1_baddr), .sd_buff_dout(d1_bdout), .sd_buff_wr(d1_bwr), .sd_buff_din(t_bdin[31:16])
 );
 
-// disk 3, never mounted
-wire [31:0] sd_lba3;
-wire        sd_rd3, sd_wr3;
-wire [15:0] sd_buff_din3;
-
-scsi_disk #(.ID(3'd3)) disk3
-(
-	.clk(clk), .reset(reset),
-	.scsi_data_o(d_d3),
-	.scsi_bsy_o(c_d3[3]), .scsi_sel_o(c_d3[4]), .scsi_atn_o(c_d3[7]), .scsi_ack_o(c_d3[6]),
-	.scsi_rst_o(c_d3[8]), .scsi_req_o(c_d3[5]), .scsi_msg_o(c_d3[2]), .scsi_cd_o(c_d3[1]),
-	.scsi_io_o(c_d3[0]),
-	.scsi_data_i(bd),
-	.scsi_bsy_i(bc[3]), .scsi_sel_i(bc[4]), .scsi_atn_i(bc[7]), .scsi_ack_i(bc[6]), .scsi_rst_i(bc[8]),
-	.scsi_req_i(bc[5]), .scsi_msg_i(bc[2]), .scsi_cd_i(bc[1]), .scsi_io_i(bc[0]),
-	.img_mounted(1'b0), .img_size(64'd0), .img_readonly(1'b0),
-	.sd_lba(sd_lba3), .sd_rd(sd_rd3), .sd_wr(sd_wr3), .sd_ack(1'b0),
-	.sd_buff_addr(8'd0), .sd_buff_dout(16'd0), .sd_buff_wr(1'b0),
-	.sd_buff_din(sd_buff_din3)
-);
-
-always @(posedge clk)
-	if (!reset && (sd_rd3 || sd_wr3)) chk(0, "disk 3 (no image) made a block request");
-
-// only one device may drive a given data bit at a time
-always @(posedge clk)
-	if (!reset && ((d_spc & d_d0) | (d_spc & d_d3) | (d_d0 & d_d3) |
-	               (d_cd & (d_spc | d_d0 | d_d3))) != 0)
-		chk(0, $sformatf("data bus contention spc=%02x d0=%02x d3=%02x cd=%02x", d_spc, d_d0, d_d3, d_cd));
-
-// ID 2: CD-ROM, with its own block device
+// ID 2: CD-ROM
 localparam CD_SECT = 8;                     // 2048-byte sectors
-reg         cd_mounted = 0;
-reg  [63:0] cd_size = 0;
-wire [31:0] cd_lba;
-wire        cd_rd, cd_wr, cd_ack, cd_bwr;
+wire        cd_ack, cd_bwr;
 wire  [7:0] cd_baddr;
-wire [15:0] cd_bdout, cd_bdin;
-
-scsi_disk #(.ID(3'd2), .CDROM(1)) cdrom
-(
-	.clk(clk), .reset(reset),
-	.scsi_data_o(d_cd),
-	.scsi_bsy_o(c_cd[3]), .scsi_sel_o(c_cd[4]), .scsi_atn_o(c_cd[7]), .scsi_ack_o(c_cd[6]),
-	.scsi_rst_o(c_cd[8]), .scsi_req_o(c_cd[5]), .scsi_msg_o(c_cd[2]), .scsi_cd_o(c_cd[1]),
-	.scsi_io_o(c_cd[0]),
-	.scsi_data_i(bd),
-	.scsi_bsy_i(bc[3]), .scsi_sel_i(bc[4]), .scsi_atn_i(bc[7]), .scsi_ack_i(bc[6]), .scsi_rst_i(bc[8]),
-	.scsi_req_i(bc[5]), .scsi_msg_i(bc[2]), .scsi_cd_i(bc[1]), .scsi_io_i(bc[0]),
-	.img_mounted(cd_mounted), .img_size(cd_size), .img_readonly(1'b0),   // read-only anyway
-	.sd_lba(cd_lba), .sd_rd(cd_rd), .sd_wr(cd_wr), .sd_ack(cd_ack),
-	.sd_buff_addr(cd_baddr), .sd_buff_dout(cd_bdout), .sd_buff_wr(cd_bwr),
-	.sd_buff_din(cd_bdin)
-);
+wire [15:0] cd_bdout;
 
 tb_blkdev #(.NBLK(CD_SECT * 4)) cd_dev
 (
 	.clk(clk), .reset(reset),
-	.sd_lba(cd_lba), .sd_rd(cd_rd), .sd_wr(cd_wr), .sd_ack(cd_ack),
-	.sd_buff_addr(cd_baddr), .sd_buff_dout(cd_bdout), .sd_buff_wr(cd_bwr), .sd_buff_din(cd_bdin)
+	.sd_lba(t_lba[95:64]), .sd_rd(t_rd[2]), .sd_wr(t_wr[2]), .sd_ack(cd_ack),
+	.sd_buff_addr(cd_baddr), .sd_buff_dout(cd_bdout), .sd_buff_wr(cd_bwr), .sd_buff_din(t_bdin[47:32])
 );
 
+// hps_io: one sd_buff bus, sd_ack per slot
+assign t_ack   = {1'b0, cd_ack, d1_ack, sd_ack0};
+assign t_baddr = sd_ack0 ? sd_buff_addr0 : d1_ack ? d1_baddr : cd_ack ? cd_baddr : 8'd0;
+assign t_bdout = sd_ack0 ? sd_buff_dout0 : d1_ack ? d1_bdout : cd_ack ? cd_bdout : 16'd0;
+assign t_bwr   = sd_ack0 ? sd_buff_wr0   : d1_ack ? d1_bwr   : cd_ack ? cd_bwr   : 1'b0;
+
 always @(posedge clk)
-	if (!reset && cd_wr) chk(0, "CD-ROM made a block write");
+	if (!reset) begin
+		if (t_rd[3] || t_wr[3]) chk(0, "ID 3 (no image) made a block request");
+		if (t_wr[2]) chk(0, "CD-ROM made a block write");
+		if ($countones(t_rd | t_wr | t_ack) > 1)
+			chk(0, $sformatf("more than one block request at once: rd %b wr %b ack %b", t_rd, t_wr, t_ack));
+		if ((d_spc & d_t) != 0)
+			chk(0, $sformatf("data bus contention spc=%02x tgt=%02x", d_spc, d_t));
+	end
 
 //----------------------------------------------------------------------------
 // block device for disk 0 (hps_io WIDE=1 timing, little-endian words)
 //----------------------------------------------------------------------------
 reg [7:0] img [0:NBLK*512-1];
 integer   blk_reads = 0, blk_writes = 0;
+integer   slow0 = 0;                        // extra clocks before sd_ack
 
 initial begin
 	forever begin
@@ -182,7 +179,7 @@ initial begin
 			l    = sd_lba0;
 			chk(!(sd_rd0 && sd_wr0), "sd_rd and sd_wr together");
 			chk(l < NBLK, $sformatf("sd_lba %0d out of range", l));
-			repeat ($urandom_range(5, 60)) begin
+			repeat ($urandom_range(5, 60) + slow0) begin
 				@(negedge clk);
 				chk(isrd ? sd_rd0 : sd_wr0, "block request dropped before sd_ack");
 				chk(sd_lba0 == l, "sd_lba changed while requesting");
@@ -502,10 +499,14 @@ task automatic mode_select(input int tgt, input [23:0] blen, output [7:0] st);
 	run_cmd(tgt, 1, 1, 6, 0, 12, 0, st);
 endtask
 
-task automatic read_toc(input bit msf, input [7:0] track, input [15:0] alloc, output [7:0] st);
+task automatic read_toc_on(input int tgt, input bit msf, input [7:0] track, input [15:0] alloc, output [7:0] st);
 	cdbb[0] = 8'h43; cdbb[1] = msf ? 8'h02 : 8'h00; cdbb[2] = 0; cdbb[3] = 0; cdbb[4] = 0; cdbb[5] = 0;
 	cdbb[6] = track; cdbb[7] = alloc[15:8]; cdbb[8] = alloc[7:0]; cdbb[9] = 0;
-	run_cmd(2, 1, 1, 10, 0, alloc, 0, st);
+	run_cmd(tgt, 1, 1, 10, 0, alloc, 0, st);
+endtask
+
+task automatic read_toc(input bit msf, input [7:0] track, input [15:0] alloc, output [7:0] st);
+	read_toc_on(2, msf, track, alloc, st);
 endtask
 
 //----------------------------------------------------------------------------
@@ -514,7 +515,57 @@ endtask
 reg [7:0] v, s, p, st;
 reg [7:0] cdgold [0:CD_SECT*2048-1];
 reg [7:0] golden [0:NBLK*512-1];
+reg [7:0] d1gold [0:D1_BLK*512-1];
 int bad;
+
+function automatic [7:0] gold_byte(input int tgt, input int a);
+	case (tgt)
+	0:       return golden[a];
+	1:       return d1gold[a];
+	default: return cdgold[a];
+	endcase
+endfunction
+
+task automatic tur_is(input int tgt, input [7:0] want, input string what);
+	reg [7:0] st;
+	set_cdb6(8'h00, 0, 0, 0, 0, 0);
+	run_cmd(tgt, 1, 1, 6, 0, 0, 0, st);
+	chk(st == want, $sformatf("%s: TEST UNIT READY %02x, want %02x", what, st, want));
+endtask
+
+// INQUIRY: peripheral type, RMB and product name follow the unit
+task automatic inq_is(input int tgt, input bit cd, input string what);
+	reg [7:0] st;
+	for (int i = 0; i < 36; i++) dbuf[i] = 8'hEE;
+	set_cdb6(8'h12, 0, 0, 0, 36, 0);
+	run_cmd(tgt, 1, 1, 6, 0, 36, 0, st);
+	chk(st == 8'h00 && last_in == 36, {what, ": INQUIRY status"});
+	chk(dbuf[0] == (cd ? 8'h05 : 8'h00) && dbuf[1] == (cd ? 8'h80 : 8'h00),
+	    $sformatf("%s: INQUIRY type %02x rmb %02x", what, dbuf[0], dbuf[1]));
+	chk({dbuf[21], dbuf[22], dbuf[23]} == (cd ? "CD-" : "DIS"),
+	    $sformatf("%s: INQUIRY product %s", what, {dbuf[16], dbuf[17], dbuf[18], dbuf[19], dbuf[20], dbuf[21], dbuf[22], dbuf[23]}));
+endtask
+
+// READ(10) by DMA, n blocks of blen bytes, checked against the unit's image
+task automatic read_is(input int tgt, input int lba, input int n, input int blen, input string what);
+	reg [7:0] st;
+	int nb;
+	for (int i = 0; i < n * blen; i++) dbuf[i] = 8'hEE;
+	set_cdb10(8'h28, lba, n);
+	run_cmd(tgt, 1, 1, 10, 1, n * blen, 0, st);
+	chk(st == 8'h00, $sformatf("%s: READ(10) status %02x", what, st));
+	nb = 0;
+	for (int i = 0; i < n * blen; i++) if (dbuf[i] != gold_byte(tgt, lba * blen + i)) nb++;
+	chk(nb == 0, $sformatf("%s: READ(10) %0d bytes differ", what, nb));
+endtask
+
+task automatic msense_wp_is(input int tgt, input bit wp, input string what);
+	reg [7:0] st;
+	set_cdb6(8'h1A, 0, 8'h00, 0, 255, 0);
+	run_cmd(tgt, 1, 1, 6, 0, 255, 0, st);
+	chk(st == 8'h00 && last_in == 12 && dbuf[2][7] == wp,
+	    $sformatf("%s: MODE SENSE %0d bytes, WP byte %02x", what, last_in, dbuf[2]));
+endtask
 
 initial begin
 	for (int i = 0; i < NBLK*512; i++) begin
@@ -527,8 +578,7 @@ initial begin
 	repeat (5) @(negedge clk);
 
 	// mount the image on disk 0
-	img_size0 = NBLK * 512; img_mounted0 = 1;
-	@(negedge clk); img_mounted0 = 0;
+	mount(0, NBLK * 512, 0);
 
 	// ---- register basics (NetBSD spc_init order) ----
 	rd(SCTL, v); chk(v == 8'h80, $sformatf("SCTL after reset %02x, want 80", v));
@@ -681,8 +731,7 @@ initial begin
 		cd_dev.img[i] = 8'((i >> 11) * 8'h40 + (i >> 9) * 8'h11 + (i & 511) * 5 + (i >> 8));
 		cdgold[i]     = cd_dev.img[i];
 	end
-	@(negedge clk); cd_size = CD_SECT * 2048; cd_mounted = 1;
-	@(negedge clk); cd_mounted = 0;
+	mount(2, CD_SECT * 2048, 0);              // read-only anyway
 	set_cdb6(8'h12, 0, 0, 0, 36, 0);
 	run_cmd(2, 1, 1, 6, 0, 36, 0, st);
 	chk(st == 8'h00 && last_in == 36, "CD INQUIRY status");
@@ -801,6 +850,167 @@ initial begin
 	chk({dbuf[8], dbuf[9], dbuf[10], dbuf[11]} == CD_SECT * 4, "READ TOC lead-out at 512");
 	chk(cd_dev.errors == 0, "CD block device model errors");
 	$display("CD-ROM ok (%0d block reads)", cd_dev.reads);
+
+	// ---- several units on the one engine ----
+	// ID 1 has no image yet: NOT READY, and nobody else is disturbed
+	tur_is(1, 8'h02, "ID 1 before its mount");
+	tur_is(0, 8'h00, "ID 0 between ID 1 commands");
+	sense_is(1, 8'h02, 8'h3A, "ID 1 no medium");
+	inq_is(1, 0, "ID 1 without an image");
+	for (int i = 0; i < D1_BLK*512; i++) begin
+		d1_dev.img[i] = 8'((i >> 9) * 8'h5B + (i & 511) * 3 + (i >> 7) + 8'h11);
+		d1gold[i]     = d1_dev.img[i];
+	end
+	mount(1, D1_BLK * 512, 1);                // read-only
+	// a disk mount raises no unit attention, on that disk or on the CD
+	tur_is(1, 8'h00, "ID 1 after its mount");
+	tur_is(2, 8'h00, "CD after the ID 1 mount");
+	inq_is(0, 0, "ID 0"); inq_is(2, 1, "ID 2"); inq_is(1, 0, "ID 1"); inq_is(3, 0, "ID 3");
+	cap_is(0, NBLK - 1, 512, "ID 0 capacity");
+	cap_is(1, D1_BLK - 1, 512, "ID 1 capacity");
+	cap_is(2, CD_SECT * 4 - 1, 512, "CD capacity");
+	// the CD's lead-out MSF is its own (ID 1's image would give 00:02:04)
+	read_toc(1, 8'hAA, 16'd804, st);
+	chk(st == 8'h00 && {dbuf[8], dbuf[9], dbuf[10], dbuf[11]} == 32'h00000208,
+	    $sformatf("CD MSF lead-out after the ID 1 mount %02x:%02x:%02x", dbuf[9], dbuf[10], dbuf[11]));
+	$display("ID 1 mount ok");
+
+	// reads alternating between the units
+	read_is(1, 3, 2, 512, "ID 1 a");
+	read_is(0, 20, 3, 512, "ID 0 a");
+	read_is(2, 9, 3, 512, "CD a");
+	read_is(1, 14, 2, 512, "ID 1 b");
+	read_is(0, 9, 4, 512, "ID 0 b");                 // includes the blocks written above
+	read_is(1, 0, 1, 512, "ID 1 c");
+	$display("alternating reads ok");
+
+	// read-only is per unit
+	for (int i = 0; i < 512; i++) obuf[i] = 8'($urandom);
+	set_cdb10(8'h2A, 2, 1);
+	run_cmd(1, 1, 1, 10, 1, 512, 0, st);
+	chk(st == 8'h02, $sformatf("ID 1 read-only WRITE(10) status %02x", st));
+	sense_is(1, 8'h07, 8'h27, "ID 1 WRITE -> DATA PROTECT");
+	msense_wp_is(1, 1, "ID 1 read-only");
+	msense_wp_is(0, 0, "ID 0 writable");
+	for (int i = 0; i < 512; i++) golden[30*512 + i] = obuf[i];
+	set_cdb10(8'h2A, 30, 1);
+	run_cmd(0, 1, 1, 10, 1, 512, 0, st);
+	chk(st == 8'h00, $sformatf("ID 0 WRITE(10) next to read-only ID 1: %02x", st));
+	read_is(0, 29, 3, 512, "ID 0 after its write");
+	bad = 0;
+	for (int i = 0; i < D1_BLK*512; i++) if (d1_dev.img[i] != d1gold[i]) bad++;
+	chk(bad == 0, $sformatf("ID 1 image changed by writes elsewhere: %0d bytes", bad));
+
+	// sense stays with its unit until REQUEST SENSE on that unit
+	set_cdb10(8'h28, NBLK - 1, 2);
+	run_cmd(0, 1, 1, 10, 1, 1024, 0, st);
+	chk(st == 8'h02, "ID 0 READ past end");                 // 0: 05/21
+	set_cdb6(8'h06, 0, 0, 0, 0, 0);
+	run_cmd(1, 1, 1, 6, 0, 0, 0, st);
+	chk(st == 8'h02, "ID 1 unknown opcode");                // 1: 05/20
+	set_cdb10(8'h2A, 0, 1);
+	run_cmd(2, 1, 1, 10, 1, 512, 0, st);
+	chk(st == 8'h02, "CD WRITE");                           // 2: 07/27
+	tur_is(3, 8'h02, "ID 3 between");                       // 3: 02/3A
+	inq_is(3, 0, "ID 3 INQUIRY between");
+	read_is(1, 5, 1, 512, "ID 1 between");                  // clears 1
+	set_cdb6(8'h06, 0, 0, 0, 0, 0);
+	run_cmd(1, 1, 1, 6, 0, 0, 0, st);                       // 1: 05/20 again
+	sense_is(0, 8'h05, 8'h21, "ID 0 sense kept across other units");
+	sense_is(0, 8'h00, 8'h00, "ID 0 sense consumed");
+	sense_is(3, 8'h02, 8'h3A, "ID 3 sense");
+	sense_is(2, 8'h07, 8'h27, "CD sense kept across other units");
+	sense_is(1, 8'h05, 8'h20, "ID 1 sense kept across other units");
+	sense_is(1, 8'h00, 8'h00, "ID 1 sense consumed");
+	sense_is(2, 8'h00, 8'h00, "CD sense consumed");
+	$display("per-unit sense ok");
+
+	// the block length is the CD's own; a disk's MODE SELECT changes nothing
+	mode_select(2, 24'd2048, st);
+	chk(st == 8'h00, "CD MODE SELECT 2048 (multi)");
+	mode_select(0, 24'd2048, st);
+	chk(st == 8'h00, "ID 0 MODE SELECT 2048");
+	cap_is(0, NBLK - 1, 512, "ID 0 stays at 512");
+	cap_is(1, D1_BLK - 1, 512, "ID 1 stays at 512");
+	cap_is(2, CD_SECT - 1, 2048, "CD at 2048 (multi)");
+	read_is(2, 5, 2, 2048, "CD 2048 a");
+	read_is(1, 7, 2, 512, "ID 1 next to a 2048 CD");
+	read_is(2, 0, 1, 2048, "CD 2048 b");
+	read_is(0, 40, 2, 512, "ID 0 next to a 2048 CD");
+	read_toc(0, 8'd0, 16'd804, st);
+	chk(st == 8'h00 && last_in == 20 && {dbuf[16], dbuf[17], dbuf[18], dbuf[19]} == CD_SECT,
+	    "READ TOC at 2048 (multi)");
+	// a disk has no READ TOC, and no MSF
+	read_toc_on(1, 1, 8'd0, 16'd804, st);
+	chk(st == 8'h02, "READ TOC on a disk");
+	sense_is(1, 8'h05, 8'h20, "READ TOC on a disk -> ILLEGAL REQUEST");
+
+	// remount ID 1 writable: the CD keeps its block length and has no unit attention
+	mount(1, D1_BLK * 512, 0);
+	tur_is(2, 8'h00, "CD after the ID 1 remount");
+	cap_is(2, CD_SECT - 1, 2048, "CD still at 2048 after the ID 1 remount");
+	for (int i = 0; i < 1024; i++) begin
+		obuf[i] = 8'($urandom);
+		d1gold[6*512 + i] = obuf[i];
+	end
+	set_cdb10(8'h2A, 6, 2);
+	run_cmd(1, 1, 1, 10, 1, 1024, 0, st);
+	chk(st == 8'h00, "ID 1 WRITE(10) after the writable remount");
+	bad = 0;
+	for (int i = 0; i < D1_BLK*512; i++) if (d1_dev.img[i] != d1gold[i]) bad++;
+	chk(bad == 0, $sformatf("ID 1 image after its WRITE(10): %0d bytes differ", bad));
+	bad = 0;
+	for (int i = 0; i < NBLK*512; i++) if (img[i] != golden[i]) bad++;
+	chk(bad == 0, $sformatf("ID 0 image after the ID 1 WRITE(10): %0d bytes differ", bad));
+	read_is(1, 5, 4, 512, "ID 1 read back");
+
+	// remount the CD bigger: unit attention on the CD only, back to 512, new MSF
+	mount(2, 64'd10000 * 2048, 0);           // 10150 frames: 02:15:25
+	tur_is(0, 8'h00, "ID 0 after the CD remount");
+	tur_is(1, 8'h00, "ID 1 after the CD remount");
+	tur_is(2, 8'h02, "CD after its remount");
+	sense_is(2, 8'h06, 8'h28, "CD remount unit attention");
+	cap_is(2, 10000 * 4 - 1, 512, "CD remounted at 512");
+	read_toc(1, 8'hAA, 16'd804, st);
+	chk(st == 8'h00 && {dbuf[8], dbuf[9], dbuf[10], dbuf[11]} == 32'h00020F19,
+	    $sformatf("CD MSF lead-out after the remount %02x:%02x:%02x", dbuf[9], dbuf[10], dbuf[11]));
+	mount(2, CD_SECT * 2048, 0);
+	tur_is(2, 8'h02, "CD after the second remount");
+	tur_is(2, 8'h00, "CD after its unit attention");
+	read_is(2, 13, 3, 512, "CD after the second remount");
+	chk(cd_dev.errors == 0 && d1_dev.errors == 0, "block device model errors");
+	$display("multi-unit ok (ID 1 %0d reads %0d writes)", d1_dev.reads, d1_dev.writes);
+
+	// SCSI RST while ID 0 waits for its block: the request stays up until
+	// the HPS takes it, and ID 1's next request must wait for that block
+	// to finish (the one sd_lba and buffer are shared)
+	slow0 = 20000;
+	select(0, 1, 1, v);
+	chk(v == 8'h10, $sformatf("RST test select: INTS %02x", v));
+	clr_ints(v);
+	begin
+		reg [2:0] ph;
+		wait_req(ph);
+		obuf[0] = 8'h80;
+		prg_out(3'd6, 1, 0);
+		wait_req(ph);
+		chk(ph == 3'd2, $sformatf("RST test: phase %0d, want COMMAND", ph));
+		set_cdb10(8'h28, 33, 1);
+		prg_out(3'd2, 10, 1);
+	end
+	wait (t_rd[0]);
+	repeat (50) @(negedge clk);
+	wr(SCMD, 8'h10);                         // RST on
+	repeat (20) @(negedge clk);
+	wr(SCMD, 8'h00);                         // and off
+	chk(t_rd[0], "ID 0 request dropped by SCSI RST");
+	rd(INTS, v);
+	if (v != 8'h00) clr_ints(v);
+	wr(PCTL, 8'h00);
+	slow0 = 0;
+	read_is(1, 11, 1, 512, "ID 1 after RST with ID 0's block pending");
+	read_is(0, 33, 2, 512, "ID 0 after RST");
+	$display("SCSI RST with a block pending ok");
 
 	// ---- ID 5 absent: selection time-out ----
 	select(5, 1, 1, v);
