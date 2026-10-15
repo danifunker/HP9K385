@@ -14,6 +14,9 @@
 //  handshake outputs, the event counter (T1 is tied high), external INT.
 //
 //  The ROM is a synchronous block RAM loaded through rom_wr/rom_addr/rom_data.
+//  The 256-byte data RAM is a second block RAM (one M10K) with one registered
+//  read and one write per clock; see "Data RAM" below for how the operands
+//  are read ahead of S_EXEC so every state keeps its clock.
 //============================================================================
 
 module upi41
@@ -47,20 +50,15 @@ module upi41
 );
 
 //----------------------------------------------------------------------------
-// Program ROM
+// Execution: FETCH -> OPWAIT -> DECODE -> (ARGWAIT) -> EXEC -> (PUSH2) -> WAIT
 //----------------------------------------------------------------------------
-reg  [7:0] rom [0:2047];
-reg [10:0] rom_ra;
-reg  [7:0] rom_q;
-always @(posedge clk) begin
-	if (rom_wr) rom[rom_addr] <= rom_data;
-	rom_q <= rom[rom_ra];
-end
+localparam S_FETCH = 3'd0, S_OPWAIT = 3'd1, S_DECODE = 3'd2, S_ARGWAIT = 3'd3,
+           S_EXEC = 3'd4, S_PUSH2 = 3'd5, S_WAIT = 3'd6;
+reg  [2:0] st;
 
 //----------------------------------------------------------------------------
 // Architectural state
 //----------------------------------------------------------------------------
-reg  [7:0] ram [0:255];
 reg [10:0] pc;
 reg  [7:0] a, psw;                  // PSW: C AC F0 BS 1 SP2..0
 reg        f1;
@@ -69,15 +67,81 @@ reg  [4:0] prescaler;
 reg        timer_run, timer_flag, timer_ovf, tirq_en, xirq_en;
 reg        flags_en, dma_en, irq_busy, irq_polled;
 reg [10:0] polled_target;
-reg  [7:0] sts, dbbi, dbbo;         // STS: 7:4 user, 1 IBF, 0 OBF
+/* verilator lint_off UNUSEDSIGNAL */
+reg  [7:0] sts;                     // STS: 7:4 user, 1 IBF, 0 OBF (3:2 unused)
+/* verilator lint_on UNUSEDSIGNAL */
+reg  [7:0] dbbi, dbbo;
 reg  [1:0] debt;                    // machine cycles still owed
 
-wire [7:0] rbase = psw[4] ? 8'd24 : 8'd0;
-function [7:0] radr; input [2:0] r; radr = rbase + {5'd0, r}; endfunction
+// Rn address: bank 1 is RAM 24..31
+function [7:0] radr; input bs; input [2:0] r; radr = {3'b000, bs, bs, r}; endfunction
+// stack entry n: low byte at 8 + 2n, high byte at 9 + 2n
+function [7:0] sadr; input [2:0] n; sadr = 8'd8 + {4'd0, n, 1'b0}; endfunction
 
 assign host_dout = host_a0 ? {sts[7:4], f1, psw[5], sts[1:0]} : dbbo;
 
 wire [7:0] p2_mask = ~((flags_en ? 8'h30 : 8'h00) | (dma_en ? 8'hC0 : 8'h00));
+
+//----------------------------------------------------------------------------
+// Program ROM
+//
+// The address is presented combinationally: the PC in S_WAIT (and 0 in
+// reset), so the opcode is already on rom_q in S_FETCH, which is always
+// entered from S_WAIT or reset; otherwise rom_ra, set in S_DECODE to the
+// argument byte or the MOVP/JMPP byte, whose data is on rom_q in S_EXEC.
+//----------------------------------------------------------------------------
+reg  [7:0] rom [0:2047];
+reg [10:0] rom_ra;
+reg  [7:0] rom_q;
+wire [10:0] rom_a = reset ? 11'd0 : (st == S_WAIT) ? pc : rom_ra;
+always @(posedge clk) begin
+	if (rom_wr) rom[rom_addr] <= rom_data;
+	rom_q <= rom[rom_a];
+end
+
+//----------------------------------------------------------------------------
+// Data RAM: one synchronous block RAM, registered read, one write per clock.
+//
+// The opcode is known in S_FETCH, so the (at most two) operand reads an
+// instruction needs are made before S_EXEC, which keeps its original clock:
+//
+//   S_FETCH   read 1: Rn (op x...1rrr), Ri (op x...0rrr, the @Ri forms) or
+//             the low byte of the top stack entry (RET/RETR)
+//   S_OPWAIT  d1 <= read 1
+//   S_DECODE  read 2 from S_DECODE on: @Ri (address d1) or the stack high
+//             byte (RET/RETR); its data sits on ram_q in S_ARGWAIT/S_EXEC
+//   S_EXEC    Rn / Ri = d1, @Ri = ram_q, pull = {ram_q, d1}; one write
+//   S_PUSH2   the second stack byte of CALL / an interrupt
+//
+// An interrupt pushes the low byte in S_FETCH and the high byte in S_PUSH2.
+// Writes land in S_FETCH/S_EXEC/S_PUSH2, always at least one clock (S_WAIT)
+// before the next S_FETCH read, so no read-during-write case is used.
+//----------------------------------------------------------------------------
+(* ramstyle = "M10K, no_rw_check" *) reg [7:0] ram [0:255];
+reg  [7:0] ram_q;
+reg        ram_we;
+reg  [7:0] ram_wa, ram_wd;
+wire [7:0] ram_ra;
+always @(posedge clk) begin
+	if (ram_we) ram[ram_wa] <= ram_wd;
+	ram_q <= ram[ram_ra];
+end
+
+reg  [7:0] op;                 // latched in S_FETCH
+reg  [7:0] d1;                 // read 1: Rn, Ri or the stack low byte
+reg  [2:0] push_hi;            // PC 10:8 of a push, for S_PUSH2
+
+wire [7:0] opc     = rom_q;    // the opcode, in S_FETCH
+wire [2:0] sp_dn   = psw[2:0] - 3'd1;
+wire       f_ret   = opc == 8'h83 || opc == 8'h93;
+wire       is_ret  = op  == 8'h83 || op  == 8'h93;
+assign ram_ra = (st == S_FETCH) ? (f_ret  ? sadr(sp_dn) : radr(psw[4], opc[3] ? opc[2:0] : {2'b00, opc[0]}))
+                                : (is_ret ? (sadr(sp_dn) | 8'd1) : d1);
+
+wire [7:0]  src  = op[3] ? d1 : ram_q;    // Rn or @Ri, in S_EXEC
+wire [7:0]  madr = op[3] ? radr(psw[4], op[2:0]) : d1;
+wire [7:0]  imm  = rom_q;      // argument byte / MOVP data in S_EXEC
+wire [10:0] jcc  = {rom_ra[10:8], imm};   // page of the argument byte
 
 //----------------------------------------------------------------------------
 // Decode helpers
@@ -108,41 +172,18 @@ function [1:0] cycles;
 	endcase
 endfunction
 
-function [9:0] add8;           // {C, AC, sum}
+function [9:0] add8;           // {C, AC, sum}; AC = carry into bit 4
 	input [7:0] x, y;
 	input       cin;
 	reg   [8:0] t;
-	reg   [4:0] t4;
 	begin
-		t  = {1'b0, x} + {1'b0, y} + {8'd0, cin};
-		t4 = {1'b0, x[3:0]} + {1'b0, y[3:0]} + {4'd0, cin};
-		add8 = {t[8], t4[4], t[7:0]};
+		t    = {1'b0, x} + {1'b0, y} + {8'd0, cin};
+		add8 = {t[8], x[4] ^ y[4] ^ t[4], t[7:0]};
 	end
 endfunction
 
-//----------------------------------------------------------------------------
-// Execution: FETCH -> OPWAIT -> DECODE -> (ARGWAIT) -> EXEC -> (PUSH2) -> WAIT
-//----------------------------------------------------------------------------
-localparam S_FETCH = 3'd0, S_OPWAIT = 3'd1, S_DECODE = 3'd2, S_ARGWAIT = 3'd3,
-           S_EXEC = 3'd4, S_PUSH2 = 3'd5, S_WAIT = 3'd6;
-reg  [2:0] st;
-reg  [7:0] op;
-reg  [3:0] argpage;            // PC page of the argument byte (Jcc target page)
-reg [10:0] push_pc;
-reg  [7:0] push_psw;
-
-wire [7:0] rn  = ram[radr(op[2:0])];
-wire [7:0] ri  = ram[radr({2'b00, op[0]})];
-wire [7:0] ind = ram[ri];
-wire [7:0] imm = rom_q;        // argument byte / MOVP data in S_EXEC
-wire [10:0] jcc = {argpage[2:0], imm};
-
-wire [2:0] sp_dn   = psw[2:0] - 3'd1;
-wire [7:0] pull_lo = ram[8'd8 + {4'd0, sp_dn, 1'b0}];
-wire [7:0] pull_hi = ram[8'd9 + {4'd0, sp_dn, 1'b0}];
-
 // ADD/ADDC operand: register, @Ri or immediate; carry in for ADDC (x1_xxxx)
-wire [7:0] add_src = (op == 8'h03 || op == 8'h13) ? imm : op[3] ? rn : ind;
+wire [7:0] add_src = (op == 8'h03 || op == 8'h13) ? imm : src;
 wire [9:0] add_res = add8(a, add_src, op[4] & psw[7]);
 
 // DA A
@@ -162,20 +203,48 @@ end
 
 wire take_x = !irq_busy && xirq_en && sts[1];
 wire take_t = !irq_busy && !(xirq_en && sts[1]) && timer_ovf && tirq_en;
+wire [10:0] irq_ret = (take_x && irq_polled) ? polled_target : pc;
 
-task automatic push_and_jump;
-	input [10:0] ret_pc;
-	input [10:0] target;
-	begin
-		ram[8'd8 + {4'd0, psw[2:0], 1'b0}] <= ret_pc[7:0];
-		push_pc  <= ret_pc;
-		push_psw <= psw;
-		psw[2:0] <= psw[2:0] + 3'd1;
-		pc       <= target;
-		st       <= S_PUSH2;
+//----------------------------------------------------------------------------
+// Data RAM writes (one per clock)
+//----------------------------------------------------------------------------
+always @(*) begin
+	ram_we = 1'b0;
+	ram_wa = madr;
+	ram_wd = a;
+	case (st)
+	S_FETCH: if (take_x || take_t) begin       // interrupt: push PC 7:0
+		ram_we = 1'b1;
+		ram_wa = sadr(psw[2:0]);
+		ram_wd = irq_ret[7:0];
 	end
-endtask
+	S_EXEC: casez (op)
+		8'b0001_1???, 8'b0001_000?: begin ram_we = 1'b1; ram_wd = src + 8'd1; end  // INC Rn/@Ri
+		8'b1100_1???, 8'b1110_1???: begin ram_we = 1'b1; ram_wd = src - 8'd1; end  // DEC Rn, DJNZ
+		8'b1010_1???, 8'b1010_000?,                                               // MOV Rn/@Ri,A
+		8'b0010_1???, 8'b0010_000?: ram_we = 1'b1;                                // XCH
+		8'b1011_1???, 8'b1011_000?: begin ram_we = 1'b1; ram_wd = imm; end        // MOV Rn/@Ri,#n
+		8'b0011_000?: begin ram_we = 1'b1; ram_wd = {src[7:4], a[3:0]}; end       // XCHD
+		8'b???1_0100: begin                                                       // CALL
+			ram_we = 1'b1;
+			ram_wa = sadr(psw[2:0]);
+			ram_wd = pc[7:0];
+		end
+		default: ;
+		endcase
+	S_PUSH2: begin                                // PSW 7:4 and PC 10:8
+		ram_we = 1'b1;
+		ram_wa = sadr(sp_dn) | 8'd1;
+		ram_wd = {psw[7:4], 1'b0, push_hi};
+	end
+	default: ;
+	endcase
+	if (reset) ram_we = 1'b0;                     // reset freezes the sequencer
+end
 
+//----------------------------------------------------------------------------
+// Sequencer
+//----------------------------------------------------------------------------
 always @(posedge clk) begin
 	dbg_dispatch <= 1'b0;
 	p1_rd        <= 1'b0;
@@ -220,38 +289,43 @@ always @(posedge clk) begin
 		S_WAIT: if (debt == 0) st <= S_FETCH;
 
 		S_FETCH: begin
+			op <= opc;
 			if (take_x || take_t) begin
-				// CALL 3 (IBF) / CALL 7 (timer); 2 machine cycles
+				// CALL 3 (IBF) / CALL 7 (timer); 2 machine cycles; the low
+				// return byte is written by the RAM write logic above
 				irq_busy   <= 1'b1;
 				irq_polled <= 1'b0;
 				if (take_t) timer_ovf <= 1'b0;
-				debt <= 2'd2;
-				push_and_jump((take_x && irq_polled) ? polled_target : pc, take_x ? 11'h003 : 11'h007);
+				debt     <= 2'd2;
+				push_hi  <= irq_ret[10:8];
+				psw[2:0] <= psw[2:0] + 3'd1;
+				pc       <= take_x ? 11'h003 : 11'h007;
+				st       <= S_PUSH2;
 			end
 			else begin
-				rom_ra <= pc;
 				dbg_pc <= pc;
 				dbg_dispatch <= 1'b1;
 				pc     <= pc + 11'd1;
 				st     <= S_OPWAIT;
 			end
 		end
-		S_OPWAIT: st <= S_DECODE;
+		S_OPWAIT: begin
+			d1 <= ram_q;
+			st <= S_DECODE;
+		end
 		S_DECODE: begin
-			op         <= rom_q;
-			debt       <= cycles(rom_q);
+			debt       <= cycles(op);
 			irq_polled <= 1'b0;
-			argpage    <= {1'b0, pc[10:8]};
-			if (two_byte(rom_q)) begin
+			if (two_byte(op)) begin
 				rom_ra <= pc;
 				pc     <= pc + 11'd1;
 				st     <= S_ARGWAIT;
 			end
-			else if (rom_q == 8'hA3 || rom_q == 8'hB3) begin   // MOVP / JMPP: same page
+			else if (op == 8'hA3 || op == 8'hB3) begin   // MOVP / JMPP: same page
 				rom_ra <= {pc[10:8], a};
 				st     <= S_ARGWAIT;
 			end
-			else if (rom_q == 8'hE3) begin                      // MOVP3: page 3
+			else if (op == 8'hE3) begin                   // MOVP3: page 3
 				rom_ra <= {3'b011, a};
 				st     <= S_ARGWAIT;
 			end
@@ -262,20 +336,14 @@ always @(posedge clk) begin
 			st <= S_WAIT;
 			casez (op)
 			// ---- arithmetic / logic ----
-			8'b0110_1???: {psw[7], psw[6], a} <= add_res;
-			8'b0110_000?: {psw[7], psw[6], a} <= add_res;
-			8'h03:        {psw[7], psw[6], a} <= add_res;
-			8'b0111_1???: {psw[7], psw[6], a} <= add_res;
-			8'b0111_000?: {psw[7], psw[6], a} <= add_res;
-			8'h13:        {psw[7], psw[6], a} <= add_res;
-			8'b0101_1???: a <= a & rn;
-			8'b0101_000?: a <= a & ind;
+			8'b0110_1???, 8'b0110_000?, 8'h03,          // ADD
+			8'b0111_1???, 8'b0111_000?, 8'h13:          // ADDC
+			              {psw[7], psw[6], a} <= add_res;
+			8'b0101_1???, 8'b0101_000?: a <= a & src;
 			8'h53:        a <= a & imm;
-			8'b0100_1???: a <= a | rn;
-			8'b0100_000?: a <= a | ind;
+			8'b0100_1???, 8'b0100_000?: a <= a | src;
 			8'h43:        a <= a | imm;
-			8'b1101_1???: a <= a ^ rn;
-			8'b1101_000?: a <= a ^ ind;
+			8'b1101_1???, 8'b1101_000?: a <= a ^ src;
 			8'hD3:        a <= a ^ imm;
 			8'h27: a <= 8'h00;
 			8'h37: a <= ~a;
@@ -293,20 +361,11 @@ always @(posedge clk) begin
 			8'h95: psw[5] <= ~psw[5];
 			8'hA5: f1 <= 1'b0;
 			8'hB5: f1 <= ~f1;
-			// ---- registers and data memory ----
-			8'b0001_1???: ram[radr(op[2:0])] <= rn + 8'd1;
-			8'b1100_1???: ram[radr(op[2:0])] <= rn - 8'd1;
-			8'b0001_000?: ram[ri] <= ind + 8'd1;
-			8'b1111_1???: a <= rn;
-			8'b1111_000?: a <= ind;
+			// ---- registers and data memory (RAM writes: see above) ----
+			8'b1111_1???, 8'b1111_000?: a <= src;     // MOV A,Rn / MOV A,@Ri
 			8'h23:        a <= imm;
-			8'b1010_1???: ram[radr(op[2:0])] <= a;
-			8'b1010_000?: ram[ri] <= a;
-			8'b1011_1???: ram[radr(op[2:0])] <= imm;
-			8'b1011_000?: ram[ri] <= imm;
-			8'b0010_1???: begin a <= rn;  ram[radr(op[2:0])] <= a; end
-			8'b0010_000?: begin a <= ind; ram[ri] <= a; end
-			8'b0011_000?: begin a <= {a[7:4], ind[3:0]}; ram[ri] <= {ind[7:4], a[3:0]}; end
+			8'b0010_1???, 8'b0010_000?: a <= src;     // XCH
+			8'b0011_000?: a <= {a[7:4], src[3:0]};    // XCHD
 			8'hC7: a <= psw | 8'h08;
 			8'hD7: psw <= a & 8'hF7;
 			8'h42: a <= timer;
@@ -347,15 +406,20 @@ always @(posedge clk) begin
 			8'h65: timer_run <= 1'b0;                  // STOP TCNT
 			// ---- control transfer ----
 			8'b???0_0100: pc <= {op[7:5], imm};        // JMP
-			8'b???1_0100: push_and_jump(pc, {op[7:5], imm});   // CALL
+			8'b???1_0100: begin                         // CALL (low byte pushed now)
+				push_hi  <= pc[10:8];
+				psw[2:0] <= psw[2:0] + 3'd1;
+				pc       <= {op[7:5], imm};
+				st       <= S_PUSH2;
+			end
 			8'h83: begin                                // RET
-				pc <= {pull_hi[2:0], pull_lo};
+				pc <= {ram_q[2:0], d1};
 				psw[2:0] <= sp_dn;
 			end
 			8'h93: begin                                // RETR
 				irq_busy <= 1'b0;
-				pc  <= {pull_hi[2:0], pull_lo};
-				psw <= {pull_hi[7:4], 1'b0, sp_dn};
+				pc  <= {ram_q[2:0], d1};
+				psw <= {ram_q[7:4], 1'b0, sp_dn};
 			end
 			8'hB3: pc <= {pc[10:8], imm};               // JMPP @A
 			8'hA3, 8'hE3: a <= imm;                     // MOVP / MOVP3
@@ -377,17 +441,11 @@ always @(posedge clk) begin
 			end
 			8'hE6: if (!psw[7]) pc <= jcc;
 			8'hF6: if (psw[7])  pc <= jcc;
-			8'b1110_1???: begin                         // DJNZ
-				ram[radr(op[2:0])] <= rn - 8'd1;
-				if (rn != 8'd1) pc <= jcc;
-			end
+			8'b1110_1???: if (src != 8'd1) pc <= jcc;   // DJNZ
 			default: ;                                  // NOP, expander ops, illegal
 			endcase
 		end
-		S_PUSH2: begin
-			ram[8'd9 + {4'd0, push_psw[2:0], 1'b0}] <= {push_psw[7:4], 1'b0, push_pc[10:8]};
-			st <= S_WAIT;
-		end
+		S_PUSH2: st <= S_WAIT;                   // high return byte (RAM writes)
 		default: st <= S_FETCH;
 		endcase
 	end

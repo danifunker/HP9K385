@@ -21,6 +21,7 @@ vram_ddr3|iverilog|tb/tb_vram_ddr3.sv rtl/vram_ddr3.sv
 ps2_hil_keymap|iverilog|tb/tb_ps2_hil_keymap.sv rtl/ps2_hil_keymap.sv
 scsi|verilator|tb/tb_scsi.sv rtl/scsi/mb87030.sv rtl/scsi/scsi_disk.sv
 wombat_bus32|verilator|tb/tb_wombat_bus32.sv rtl/wombat/wombat_bus32.sv
+upi41_diff|verilator|tb/tb_upi41_diff.sv tb/upi41_ref.sv rtl/upi41.sv
 "
 
 fail=0
@@ -34,7 +35,7 @@ echo "$BENCHES" | while IFS='|' read -r name sim srcs; do
 		verilator $VFLAGS --top-module "tb_$name" --Mdir "$OUT/obj_$name" -o tb $srcs > "$log" 2>&1 &&
 			"$OUT/obj_$name/tb" >> "$log" 2>&1
 	fi
-	if grep -q "ALL TESTS PASSED\|: OK" "$log" && ! grep -q "TEST FAILED\|^FAIL" "$log"; then
+	if grep -q "ALL TESTS PASSED\|: OK\|^PASS:" "$log" && ! grep -q "TEST FAILED\|^FAIL" "$log"; then
 		echo "pass  $name"
 	else
 		echo "FAIL  $name  (see $log)"
