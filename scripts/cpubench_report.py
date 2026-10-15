@@ -16,7 +16,8 @@ import re
 import sys
 
 NAMES = ["ALU", "BRANCH", "MULDIV", "L1READ", "L1COPY", "STREAD", "STWRITE",
-         "MEMCPY", "CHASE", "FPU", "ICACHE"]
+         "MEMCPY", "CHASE", "FPU", "ICACHE",
+         "M16ZERO", "M16COPY"]
 LED = re.compile(r"\[LED\] ([0-9A-F]{2})\s+@(\d+) .*disp=(\d+)")
 
 

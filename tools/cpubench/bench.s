@@ -65,6 +65,10 @@ start:
 		subq.l	#1,d1
 		bpl.s	.fill
 		bsr	chase_build
+		lea	BUF2+800*1024,a0	; M16ZERO's area: non-zero first
+		move.w	#(64*1024)/4-1,d1
+.pre:		move.l	#$A5A5A5A5,(a0)+
+		dbra	d1,.pre
 
 		lea	kernels(pc),a4
 .next:		move.l	(a4)+,d0
@@ -119,8 +123,9 @@ ptm_read:
 
 kernels:	dc.l	k_alu, k_branch, k_muldiv, k_l1read, k_l1copy
 		dc.l	k_stread, k_stwrite, k_memcpy, k_chase, k_fpu, k_icache
+		dc.l	k_m16zero, k_m16copy
 		dc.l	0
-NKERN		equ	11
+NKERN		equ	13
 
 names:		dc.b	"ALU     ",0
 		dc.b	"BRANCH  ",0
@@ -133,6 +138,8 @@ names:		dc.b	"ALU     ",0
 		dc.b	"CHASE   ",0
 		dc.b	"FPU     ",0
 		dc.b	"ICACHE  ",0
+		dc.b	"M16ZERO ",0
+		dc.b	"M16COPY ",0
 		even
 
 ;=======================================================================
@@ -324,6 +331,37 @@ k_fpu:
 		swap	d0
 		eor.l	d0,d7
 		rts
+
+; MOVE16 (xxx).L,(An)+ zeroing 64 KB from a zero line, as HP-UX's pg_zero
+; does; checksum = sum of the area afterwards (0) + longs moved
+k_m16zero:
+		lea	BUF2+800*1024,a0
+		move.w	#(64*1024)/16-1,d5
+.l:		move16	zline,(a0)+
+		dbra	d5,.l
+		lea	BUF2+800*1024,a0
+		bsr	sum_1k
+		move.l	a0,d0
+		sub.l	#BUF2+800*1024+1024,d0
+		add.l	d0,d7			; 0 if sum_1k walked 1 KB
+		lea	BUF2+800*1024+63*1024,a0
+		move.l	d7,d3
+		bsr	sum_1k
+		add.l	d3,d7
+		rts
+
+; MOVE16 (Ax)+,(Ay)+: copy 64 KB of the pattern, then sum the last 1 KB
+k_m16copy:
+		lea	BUF,a0
+		lea	BUF2+900*1024,a1
+		move.w	#(64*1024)/16-1,d5
+.l:		move16	(a0)+,(a1)+
+		dbra	d5,.l
+		lea	BUF2+900*1024+63*1024,a0
+		bra	sum_1k
+
+		cnop	0,16
+zline:		dc.l	0,0,0,0
 
 ; straight-line code bigger than the 4 KB I-cache: 8 KB, 20 passes
 k_icache:
