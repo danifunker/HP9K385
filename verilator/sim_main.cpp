@@ -18,6 +18,7 @@
 //   --key CYC:CODE     at clock CYC send HIL keycode CODE (hex; bit 0 = release); repeatable
 //   --mem-model M      main memory timing: ideal (default, MEM_LATENCY clocks a beat)
 //                      or sdram (the measured sdram_beat32 timing, see mem_service)
+//   --vram-latency N   98550 frame-buffer beat latency in clocks (default 2)
 //   --ram-mb N         main RAM size, power of two, 1..128 (default 8)
 //   --cycles N         stop after N clocks (default 50,000,000)
 //   --patch OFF=VAL    sim-only ROM patch: 16-bit VAL at even byte OFF (hex);
@@ -161,12 +162,15 @@ static void mem_service() {
 }
 
 // ---- 98550A VRAM port: same handshake as the memory port ----
+// (--vram-latency N: clocks per beat; the board's DDR3 path is slower than
+// the default, which matters for software that does not wait for the mover)
 static int vram_wait = -1;
+static int vram_latency = MEM_LATENCY;
 
 static void vram_service() {
 	top->vram_ack = 0;
 	if (!top->vram_req) { vram_wait = -1; return; }
-	if (vram_wait < 0) { vram_wait = MEM_LATENCY; return; }
+	if (vram_wait < 0) { vram_wait = vram_latency; return; }
 	if (--vram_wait > 0) return;
 	vram_wait = -2;
 	uint32_t o = (top->vram_addr << 2) & (vram.size() - 1);
@@ -322,6 +326,7 @@ int main(int argc, char **argv) {
 		else if (a == "--vram-trace") vrt_path = next();
 		else if (a == "--vram-trace-from") vrt_from = strtoull(next(), nullptr, 0);
 		else if (a == "--stop-pc") stop_pc = strtoll(next(), nullptr, 16);
+		else if (a == "--vram-latency") vram_latency = (int)strtol(next(), nullptr, 0);
 		else if (a == "--mem-model") { std::string m = next(); mem_sdram = (m == "sdram");
 			if (m != "sdram" && m != "ideal") { fprintf(stderr, "--mem-model: ideal or sdram\n"); return 1; } }
 		else if (a == "--loop-window") loop_window = strtoull(next(), nullptr, 0);

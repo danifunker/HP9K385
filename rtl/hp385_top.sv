@@ -474,7 +474,11 @@ wire  [7:0] io8_rdata = (svc_dev == DEV_CARD) ? card_dout :
 
 // 16-bit devices: high word half (lanes 3:2) at the beat address, then the
 // low half (lanes 1:0) at +2
-wire        io16_cs    = (svc == S_IO16) && (|io_pend);
+// A register write to the 98550 waits while its window mover is busy, so
+// software that does not poll (HP-UX's ITE) cannot change a move in flight.
+wire        cats_busy;
+wire        io16_wait  = (svc_dev == DEV_CATSEYE) && svc_write && cats_busy;
+wire        io16_cs    = (svc == S_IO16) && (|io_pend) && !io16_wait;
 wire [31:0] io16_addr  = {svc_addr, io_pend[1] ? 2'd0 : 2'd2};
 wire  [1:0] io16_be    = io_pend[1] ? svc_be[3:2] : svc_be[1:0];
 wire [15:0] io16_wdata = io_pend[1] ? svc_wdata[31:16] : svc_wdata[15:0];
@@ -604,7 +608,7 @@ catseye catseye (
 	.irq(gfx_irq),
 	.in_vblank(),
 	.display_enable(display_enable),
-	.busy(),
+	.busy(cats_busy),
 	.unsupported(gfx_unsupported)
 );
 
@@ -814,7 +818,8 @@ always @(posedge clk) begin
 		end
 	end
 	S_IO16: begin
-		if (io_pend[1]) begin
+		if (io16_wait) ;                  // 98550 register write: mover busy
+		else if (io_pend[1]) begin
 			io_rdata[31:16] <= io16_rdata;
 			io_pend[1]      <= 1'b0;
 		end
