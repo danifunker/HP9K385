@@ -79,6 +79,9 @@ task rreg_chk(input [10:0] w, input [15:0] exp);
 		@(negedge clk); reg_cs = 0;
 	end
 endtask
+task rreg(input [10:0] w, output [15:0] v);
+	begin @(negedge clk); reg_cs = 1; reg_we = 0; reg_word = w; #1 v = reg_dout; @(negedge clk); reg_cs = 0; end
+endtask
 task wait_idle; begin @(posedge clk); @(posedge clk); while (busy) @(posedge clk); end endtask
 
 // rules per plane: bank 0 PRR/WRR; tcwen picks the planes
@@ -256,6 +259,32 @@ initial begin
 	wreg(11'h28A, 16'h0000);
 	wreg(11'h280, 16'hFF00);
 	set_rule(8'hFF, 4'd3, 4'd3);
+
+	// ---- BASIC/WS text: Topcat registers, START_WMOVE, then poll
+	// START_WMOVE until it reads 0 before the next glyph (no WMOVE_ACTIVE)
+	wreg(11'h284, 16'hFF00);
+	wreg(11'h077, 16'hFF03);                  // WRR (Topcat): source, all planes
+	for (y = 640; y < 660; y = y + 1) for (x = 1280; x < 1360; x = x + 4)
+		hostw(y * 2048 + x, {8'(x*3+y), 8'(x+y*7), 8'(x^y), 8'(y*11-x)}, 4'hF);
+	for (y = 640; y < 660; y = y + 1) for (x = 1280; x < 1360; x = x + 4) begin
+		ref_[y*2048+x] = x*3+y; ref_[y*2048+x+1] = x+y*7; ref_[y*2048+x+2] = x^y; ref_[y*2048+x+3] = y*11-x;
+	end
+	for (i = 0; i < 6; i = i + 1) begin
+		wreg(11'h081, 16'd10); wreg(11'h083, 16'd20);
+		wreg(11'h07F, 16'd300); wreg(11'h07D, 16'(200 + 10 * i));
+		wreg(11'h07B, 16'd640); wreg(11'h079, 16'(1280 + 10 * i + 3));
+		wreg(11'h048, 16'hFF00);              // FB write enable
+		wreg(11'h04E, 16'hFF00);              // START_WMOVE
+		ref_move(1280 + 10 * i + 3, 640, 200 + 10 * i, 300, 10, 20, 4'd3, 8'hFF, 0, 0, 0, 0, 0);
+		begin : poll
+			reg [15:0] v;
+			integer g;
+			g = 0;
+			do begin rreg(11'h04E, v); g = g + 1; end while (v != 0 && g < 100000);
+		end
+	end
+	wait_idle;
+	compare("BASIC-style glyph moves", 190, 290, 90, 40);
 
 	if (unsupported) begin $display("FAIL unsupported flagged"); errors = errors + 1; end
 	if (errors == 0) $display("ALL TESTS PASSED"); else $display("TEST FAILED (%0d)", errors);

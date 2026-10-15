@@ -134,6 +134,10 @@ always @(*) begin
 	else case (reg_word)
 	11'h020: reg_dout = in_vblank ? 16'hFF00 : 16'h0000;
 	11'h022: reg_dout = wm_busy ? {fben[0], 8'h00} : 16'h0000;
+	// START_WMOVE reads back the planes still moving: BASIC/WS polls this,
+	// not WMOVE_ACTIVE, before it programs the next move (MAME's moves are
+	// instant, so it returns 0 there)
+	11'h04E: reg_dout = wm_busy ? {fben[0], 8'h00} : 16'h0000;
 	11'h024: reg_dout = {vbl_pend, 8'h00};
 	11'h026: reg_dout = {wm_pend, 8'h00};
 	11'h040: reg_dout = {display_enable, 8'h00};
