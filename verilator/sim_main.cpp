@@ -16,6 +16,8 @@
 //   --disk0 FILE / --disk1 FILE   SCSI disk images (IDs 0 / 1); writes go back to the file
 //   --cd FILE          CD-ROM image on ID 2: flat 2048-byte sectors (an .iso), read-only
 //   --key CYC:CODE     at clock CYC send HIL keycode CODE (hex; bit 0 = release); repeatable
+//   --mem-model M      main memory timing: ideal (default, MEM_LATENCY clocks a beat)
+//                      or sdram (the measured sdram_beat32 timing, see mem_service)
 //   --ram-mb N         main RAM size, power of two, 1..128 (default 8)
 //   --cycles N         stop after N clocks (default 50,000,000)
 //   --patch OFF=VAL    sim-only ROM patch: 16-bit VAL at even byte OFF (hex);
@@ -74,14 +76,60 @@ static uint32_t be32(const std::vector<uint8_t> &m, uint32_t off) {
 	return (uint32_t)m[off] << 24 | (uint32_t)m[off + 1] << 16 | (uint32_t)m[off + 2] << 8 | m[off + 3];
 }
 
-// ---- memory port: fixed latency, one request at a time ----
+// ---- memory port: one request at a time ----
+// "ideal" (default): every beat acks MEM_LATENCY clocks after the request.
+// "sdram": the timing of the real path, rtl/mem/sdram_beat32.sv on
+// rtl/mem/sdram.sv, as measured by the Quadra's tb_sdram against a chip
+// model (same RTL): a read 6 clocks with its SDRAM row closed and 4 with it
+// open, 1 clock for a longword of the 16-byte line the last read fetched (once
+// its BL8 tail is in, 2 clocks after the critical word); a write is posted (1
+// clock) into an eight-deep FIFO that drains one write per 2.45 clocks, and a
+// read waits for the FIFO to empty; any write drops the line.  Rows are
+// 1 KB, one open row per 8 MB bank.  The data itself is the same either way.
 static const int MEM_LATENCY = 2;
 static int mem_wait = -1;
+static bool mem_sdram = false;
+static bool     ln_valid = false;
+static uint32_t ln_tag;              // SDRAM byte address >> 4
+static uint64_t ln_ready;            // clock the line's BL8 tail is in
+static int64_t  open_row[4] = {-1, -1, -1, -1};
+static uint64_t wq_done[8];          // drain completion of queued writes, x100
+static int      wq_n = 0;
+static uint64_t wq_last = 0;         // x100: when the last queued write drains
+
+static int mem_latency() {
+	if (!mem_sdram) return MEM_LATENCY;
+	uint32_t la = top->mem_addr << 2;
+	uint32_t sa = top->mem_sel == 1 ? la - ram_base : (top->mem_sel == 0 ? 0x3FC0000 : 0x3FE0000) + (la & 0x1FFFF);
+	uint64_t now = cycle * 100;
+	while (wq_n && wq_done[0] <= now) { for (int i = 1; i < wq_n; i++) wq_done[i - 1] = wq_done[i]; wq_n--; }
+	int bank = (sa >> 23) & 3;
+	int64_t row = (sa >> 10) & 0x1FFF;
+	if (top->mem_we) {
+		ln_valid = false;
+		uint64_t start = now;
+		if (wq_n == 8) start = wq_done[0];             // full: wait for a slot
+		wq_last = (wq_last > start ? wq_last : start) + 245;
+		if (wq_n == 8) { for (int i = 1; i < 8; i++) wq_done[i - 1] = wq_done[i]; wq_n--; }
+		wq_done[wq_n++] = wq_last;
+		open_row[bank] = row;
+		return (int)((start - now + 99) / 100) + 1;
+	}
+	if (ln_valid && (sa >> 4) == ln_tag && wq_n == 0)
+		return ln_ready > cycle ? (int)(ln_ready - cycle) + 1 : 1;
+	uint64_t start = now;
+	if (wq_n && wq_last > start) start = wq_last;          // drain first
+	if (ln_valid && ln_ready * 100 > start) start = ln_ready * 100;
+	int lat = (int)((start - now + 99) / 100) + (open_row[bank] == row ? 4 : 6);
+	open_row[bank] = row;
+	ln_valid = true; ln_tag = sa >> 4; ln_ready = cycle + lat + 2;
+	return lat;
+}
 
 static void mem_service() {
 	top->mem_ack = 0;
 	if (!top->mem_req) { mem_wait = -1; return; }
-	if (mem_wait < 0) { mem_wait = MEM_LATENCY; return; }
+	if (mem_wait < 0) { mem_wait = mem_latency(); return; }
 	if (--mem_wait > 0) return;
 	mem_wait = -2;   // acked; wait for mem_req to drop
 	uint32_t la = top->mem_addr << 2;
@@ -268,6 +316,8 @@ int main(int argc, char **argv) {
 		else if (a == "--pc-trace") pct_path = next();
 		else if (a == "--pc-trace-max") pct_max = strtoull(next(), nullptr, 0);
 		else if (a == "--stop-pc") stop_pc = strtoll(next(), nullptr, 16);
+		else if (a == "--mem-model") { std::string m = next(); mem_sdram = (m == "sdram");
+			if (m != "sdram" && m != "ideal") { fprintf(stderr, "--mem-model: ideal or sdram\n"); return 1; } }
 		else if (a == "--loop-window") loop_window = strtoull(next(), nullptr, 0);
 		else if (a == "--fst") fst_path = next();
 		else if (a == "--fst-start") fst_start = strtoull(next(), nullptr, 0);
@@ -459,7 +509,8 @@ int main(int argc, char **argv) {
 		}
 
 		if (top->leds != last_leds) {
-			printf("[LED] %02X  @%llu pc=%08X\n", top->leds, (unsigned long long)cycle, pc);
+			printf("[LED] %02X  @%llu pc=%08X disp=%llu\n", top->leds, (unsigned long long)cycle, pc,
+			       (unsigned long long)dispatches);
 			if (log != stdout) fprintf(log, "%12llu LED  %02X\n", (unsigned long long)cycle, top->leds);
 			last_leds = top->leds;
 		}
