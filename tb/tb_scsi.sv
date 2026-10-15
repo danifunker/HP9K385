@@ -664,6 +664,52 @@ initial begin
 	nbsd_style = 0;
 	$display("NetBSD-style status/message ok");
 
+	// ---- HP-UX 9: a short DATA IN aborted with SCTL bit 6 (Control Reset) ----
+	// INQUIRY for 100 bytes; the target sends 36 and goes to STATUS, so the
+	// transfer ends in service required.  HP-UX then rewrites SCMD = 84 and
+	// pulses SCTL bit 6 to kill that command, checks SSTS bit 7, and reads
+	// STATUS / MESSAGE IN by hand.  No interrupt may follow the bus free.
+	begin : hpux_abort
+		reg [7:0] v, s, sc, m;
+		reg [2:0] ph;
+		int got;
+		select(0, 0, 1, v);
+		chk(v == 8'h10, $sformatf("HP-UX abort: select INTS %02x", v));
+		clr_ints(v);
+		wait_req(ph);
+		chk(ph == 3'd2, $sformatf("HP-UX abort: phase %0d, want COMMAND", ph));
+		set_cdb6(8'h12, 0, 0, 0, 100, 0);
+		prg_out(3'd2, 6, 1);
+		wait_req(ph);
+		chk(ph == 3'd1, $sformatf("HP-UX abort: phase %0d, want DATA IN", ph));
+		prg_in(3'd1, 100, 1, got, v);
+		chk(got == 36 && v == 8'h08, $sformatf("HP-UX abort: %0d bytes, INTS %02x; want 36, 08", got, v));
+		wr(SCMD, 8'h84);                     // HP-UX: a transfer without DMA ...
+		rd(SCTL, sc);
+		wr(SCTL, sc | 8'h40);                // ... killed by Control Reset
+		wr(SCTL, sc);
+		rd(SSTS, s);
+		chk(s[7], $sformatf("HP-UX abort: SSTS %02x, still connected expected", s));
+		repeat (200) @(negedge clk);
+		rd(INTS, v);
+		chk(v == 8'h00, $sformatf("HP-UX abort: INTS %02x after Control Reset, want 00", v));
+		wait_req(ph);
+		chk(ph == 3'd3, $sformatf("HP-UX abort: phase %0d, want STATUS", ph));
+		nbsd_in(st);
+		chk(st == 8'h00, $sformatf("HP-UX abort: status %02x", st));
+		wait_req(ph);
+		chk(ph == 3'd7, $sformatf("HP-UX abort: phase %0d, want MESSAGE IN", ph));
+		nbsd_in(m);
+		wait_ints(v);
+		chk(v == 8'h20, $sformatf("HP-UX abort: bus free INTS %02x, want 20", v));
+		clr_ints(v);
+		wr(PCTL, 8'h00);
+		repeat (3000) @(negedge clk);
+		rd(INTS, v);
+		chk(v == 8'h00, $sformatf("HP-UX abort: stray INTS %02x after the command (no owner)", v));
+		$display("HP-UX Control Reset abort ok");
+	end
+
 	// ---- READ CAPACITY ----
 	set_cdb10(8'h25, 0, 0);
 	run_cmd(0, 1, 1, 10, 0, 8, 0, st);

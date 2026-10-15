@@ -380,6 +380,7 @@ always @(*) begin
 				dreq_en_n  = 1'b0;
 				ints_n     = ints_n | 8'h08;
 				spc_busy_n = 1'b0;
+				xfer_ip_n  = 1'b0;
 				odata_n    = 8'h00;
 				go(S_IDLE, 10'd0, 1'b0);
 			end
@@ -463,7 +464,25 @@ always @(*) begin
 	if (cs && we) begin
 		case (rs)
 		4'd0: bdid_n = din[2:0];
-		4'd1: sctl_n = din;
+		4'd1: begin
+			sctl_n = din;
+			if (din[6]) begin
+				// Control Reset: abort the command in progress but stay
+				// connected.  HP-UX 9 ends a DATA IN that went to STATUS
+				// early with SCMD = 84 then an SCTL bit 6 pulse, checks
+				// SSTS bit 7, and must see no interrupt from the killed
+				// transfer (or scsi_if_isr panics: "Service Req'd and no
+				// owner").
+				dreq_en_n  = 1'b0;
+				spc_busy_n = 1'b0;
+				xfer_ip_n  = 1'b0;
+				fclr       = 1'b1;
+				to_run_n   = 1'b0;
+				odata_n    = 8'h00;
+				ints_n     = 8'h00;
+				go(S_IDLE, 10'd0, 1'b0);
+			end
+		end
 		4'd2: begin
 			scmd_n = din;
 			if (!sctl[7]) set_ctrl(din[4] ? L_RST : 9'd0, L_RST);

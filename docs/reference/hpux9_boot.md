@@ -580,3 +580,93 @@ How the storm comes about:
 - **The result.** The 8250's interrupt was never serviced, and the level-triggered request re-entered at once.
 
 The fix (`rtl/hp98644.sv`) is to make bit 6 follow the 8250's INTR in both bytes. MAME's 98644 leaves the interrupt unwired, so MAME never shows this. The 98265A already reports its bit 6 (`spc_irq`).
+
+## 8. `panic: scsi_if_isr: Service Req'd and no owner` (2026-10-15)
+
+On the board, after the level-5 serial fix, the kernel prints "Disk Information:" and the root-device line, then panics. The full-system sim run `build/hpux_dbg3` reproduces it, and its I/O event log shows the whole sequence. Cycle numbers below are from that log.
+
+SPC register *n* is at byte 0x6E0021+2*n*. In the log, the longword 0x6E0020+4*k* with `be=4` is register 2*k*, and with `be=1` it is register 2*k*+1.
+
+### 8.1 What raises the panic [V]
+
+`scsi_if_isr` (0xe207a):
+
+1. Reads INTS **once**, into D7.
+2. Reads TEMP and SERR.
+3. Writes D7 back to INTS (write-1-to-clear).
+4. Handles the bits in order:
+   - 0x01 (reset);
+   - 0x02 / SERR;
+   - 0x20 (disconnect: bus-free callbacks);
+   - 0x40 (reselection);
+   - 0x04 (time-out: panics "Timeout and no owner" if the interface has no owner).
+5. Finally, if D7 & 0x10 (command complete) or D7 & 0x08 (**service required**):
+   - `owner = isc->($4a)` is the buf that holds the select code. It is set by `get_selcode`/`selcode_dequeue` and cleared by `drop_selcode` when a command ends.
+   - If the owner is 0, the kernel panics: "Service Req'd and no owner" when bit 0x08 is set, otherwise "command complete and no owner".
+   - With an owner, the 0x08 path (0xe2440) aborts the transfer as described in §8.2 and hands the residual count to the owner's state machine.
+
+### 8.2 The first command (INQUIRY) as the sim runs it [V]
+
+The kernel's set-up (§7.4) leaves INTS untouched: HP-UX writes INTS = 0, which clears nothing. The card read at `scsi_if_init` already shows bit 6 (an SPC interrupt pending). The first interrupt after `spl0()` is **INTS 0x20**, a stale disconnect from the core's 10 ms bus-free timer after the loader's last command. It is harmless: there are no bus-free waiters, so the ISR ignores it.
+
+Then (0xe25d4 `scsi_if_select` and the `scsi_fsm` states):
+
+| Cycle | Access | Meaning |
+|---|---|---|
+| 440490xxx | SSTS 0x05, INTS 0x00; PCTL = 0; TEMP = 0x81; SCMD = 0x60; TC = 03 0E 04; **SCMD = 0x20** | select ID 0 with ATN |
+| 440492431 | INTS **0x10** → write 0x10 | selection done (owner set) |
+| | SCMD 0x40 / TEMP = 0xC0 / SCMD 0xE0 … 0xC0 | MESSAGE OUT (IDENTIFY) by manual REQ/ACK |
+| 440501xxx | TC = 6, PCTL = 2, **SCMD = 0x84**, 6 bytes through DREG; INTS 0x10 | COMMAND phase, program transfer |
+| 440508xxx | TC = **0x64**, PCTL = 1, SCMD = 0x84, DREG polled | DATA IN: INQUIRY asks for 100 bytes; the target sends 36 |
+| 440510718 | INTS **0x08** | the target goes to STATUS while TC = 0x40: **expected service required, with an owner** |
+| 440512188 | ISR: INTS 0x08 → write 0x08 | |
+| 440512406 | **SCMD read 0x84, write 0x84** (`bset #2`) | HP-UX's abort, part 1 |
+| 440512438 | **SCTL 0x1B → 0x5B → 0x1B** (bit 6 pulse) | abort, part 2: *Control Reset* |
+| | SSTS 0x91 (must have bit 7 = connected); TC residue read (0x40) | |
+| 440515xxx | SCMD 0xE0 / TEMP read / SCMD 0xC0 | STATUS byte by manual handshake |
+| 440517xxx | SCMD 0xE0 / TEMP = 00 / SCMD 0xC0; PSNS 00 | MESSAGE IN "command complete", bus free → `drop_selcode`, owner = 0 |
+| 440522480 | level-4 interrupt; **INTS 0x08** | **nobody owns the interface → panic** |
+
+A service required during a transfer is normal, so HP-UX expects one. It does not expect one after the Control-Reset pulse.
+
+### 8.3 Cause [V from the trace and `rtl/scsi/mb87030.sv`]
+
+HP-UX aborts the transfer in two steps.
+
+1. It rewrites SCMD with the program-transfer bit set. This re-issues *transfer*, deliberately without DMA.
+2. It immediately pulses **SCTL bit 6 (Control Reset)** to kill that command.
+
+In the core:
+
+1. The SCMD write 0x84 starts a new transfer (`3'd4` → `go(S_X_WREQ, D5)`).
+2. **SCTL bit 6 is stored and does nothing.**
+3. About 25 cycles later, `S_X_WREQ` sees REQ in STATUS phase, which is not PCTL = 1, and posts **INTS |= 0x08**.
+
+The card interrupt is held off while the ISR is still running at level 4. The owner then finishes STATUS and MESSAGE IN, drops the select code, and returns. The pending 0x08 is taken with no owner, and the kernel panics.
+
+Two smaller defects show up in the same trace:
+
+- After a phase mismatch the core leaves `xfer_ip` set: SSTS reads 0x91 instead of 0x81.
+- SCTL bit 7 (Reset & Disable) does not clear INTS. On real hardware HP-UX's 0xC0 write during its bus reset would clear INTS; here the loader's stale 0x20 survives into the kernel. MAME's `sctl_w` has the same gaps; it only stores SCTL.
+
+### 8.4 The coordinator's candidates, ranked against the trace
+
+1. **The `S_X_WREQ` phase-mismatch path firing for a re-issued transfer that Control Reset should have killed: confirmed.** It is the panic.
+2. **The INTS write semantics: not the cause.** HP-UX always writes back the value it read, and `ints_n & ~(din & ints)` clears exactly that.
+3. **A stale INTS from the boot ROM or loader: present, but not the panic.** The loader leaves INTS = 0; the bus-free timer then posts 0x20. It arrives as a harmless 0x20 interrupt at `spl0`. The real chip's Reset & Disable would have cleared it.
+4. **HP-UX's own bus reset leaving INTS bits: no.** The reset sets no INTS bit in the core. It only fails to clear the stale one (item 3) and holds RST too long (§7.4).
+
+### 8.5 RTL change (in `mb87030.sv`)
+
+- **SCTL bit 6, Control Reset.** On a write that sets it (or while it is set):
+  - abort the current command: `state → S_IDLE`, `dreq_en = 0`, `spc_busy = 0`, `xfer_ip = 0`, clear the FIFO, cancel the selection time-out;
+  - post **no** INTS bits;
+  - **keep `init_conn`** and the target connection. HP-UX checks SSTS bit 7 right after the pulse and panics if it is clear.
+- **SCTL bit 7, Reset & Disable.** On a write that sets it: do the same abort, **clear INTS**, release RST and the other bus lines, and drop `init_conn`.
+- **Phase mismatch:** also clear `xfer_ip`.
+
+Confidence:
+
+- High: the cause. The sim trace shows the exact sequence, and the panic string follows the second 0x08.
+- High: the Control-Reset fix.
+- Medium: INTS clearing on Reset & Disable. It matches the driver's expectation and the NetBSD `spc` driver's identical init sequence, but I have no datasheet here.
