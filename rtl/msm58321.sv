@@ -63,13 +63,24 @@ function [7:0] bcd_inc;               // two BCD digits + 1
 	bcd_inc = (v[3:0] == 4'd9) ? {v[7:4] + 4'd1, 4'd0} : {v[7:4], v[3:0] + 4'd1};
 endfunction
 
+// The clock is battery-backed: a machine reset does not touch the time,
+// only the power-up values below (2000-01-01 00:00:00, 24-hour mode).  The
+// MiSTer sends its time once, while the core is still held in reset for
+// the ROM download; set_t is not reset either, so that toggle is applied
+// as soon as reset ends (it used to be swallowed, and every OS saw
+// 1 January 2000: HP-UX "bad date in real-time clock", NetBSD "clock lost
+// 7897 days").
 integer i;
+initial begin
+	for (i = 0; i <= 12; i = i + 1) r[i] = 4'd0;
+	r[5] = 4'h8;
+	r[7] = 4'd1; r[9] = 4'd1;
+	set_t = 1'b0;
+end
+
 always @(posedge clk) begin
 	if (reset) begin
-		for (i = 0; i <= 12; i = i + 1) r[i] <= 4'd0;
-		r[5] <= 4'h8;                        // 24-hour mode
-		r[7] <= 4'd1; r[9] <= 4'd1;          // 1 January
-		addr <= 0; div <= 0; set_t <= rtc_set[64];
+		addr <= 0; div <= 0;
 	end
 	else begin
 		div <= (div == CLK_HZ - 1) ? '0 : div + 1'd1;

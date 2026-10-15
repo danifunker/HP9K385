@@ -41,7 +41,15 @@ endtask
 reg [47:0] t;
 reg [3:0] v;
 initial begin
+	// the MiSTer sends its time while the core is still in reset (ROM
+	// download): it must be applied once reset ends
+	repeat (3) @(posedge clk);
+	setrtc(8'h26, 8'h10, 8'h15, 8'h19, 8'h30, 8'h00, 4'd4);
 	repeat (3) @(posedge clk); reset = 0;
+	readtime(t); check("time sent during reset", t, 48'h261015_193000);
+	// a machine reset keeps the time (battery-backed)
+	@(negedge clk); reset = 1; repeat (5) @(posedge clk); @(negedge clk); reset = 0;
+	readtime(t); check("time kept across reset", t, 48'h261015_193000);
 	setrtc(8'h99, 8'h12, 8'h31, 8'h23, 8'h59, 8'h58, 4'd5);
 	readtime(t); check("set", t, 48'h991231_235958);
 	seconds(3);
