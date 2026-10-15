@@ -135,7 +135,9 @@ This is ported from MAME. Lines that the SPC sets go into a private register ins
 
 ### Reset
 
-`reset` performs MAME `device_reset`. Every register becomes 0, except SCTL, which becomes 0x80 (reset & disable). The FIFO is emptied, all lines and data are released and the SPC goes idle. While SCTL[7] is set, any non-idle state falls back to idle with the lines released. A select that is issued while the SPC is disabled is aborted.
+`reset` performs MAME `device_reset`. Every register becomes 0, except SCTL, which becomes 0x80 (reset & disable). The FIFO is emptied, all lines and data are released and the SPC goes idle. While SCTL[7] is set, any non-idle state falls back to idle with the lines released, RST is released, and SCMD and INTS read 0. A select that is issued while the SPC is disabled is aborted.
+
+HP-UX 9 ends its SCSI bus reset with SCMD = 0x10 (RST), SCTL = 0xC0, SCMD = 0, so RST is dropped by SCTL[7]. NetBSD's `spc_scsi_reset` drops it with an SCMD write while SCTL[7] is clear.
 
 ### Deviations from MAME
 
@@ -149,6 +151,8 @@ This is ported from MAME. Lines that the SPC sets go into a private register ins
 - `dreq` for DATA OUT stops once TC bytes are queued. MAME only drops it when the FIFO is full and relies on the DMA count.
 - Reset-and-disable also clears the data lines. MAME leaves them.
 - MAME's own quirk is kept: a phase mismatch clears SPC_BUSY but not XFER_IN_PROGRESS.
+- SCTL[7] (reset & disable) releases RST and clears SCMD and INTS. MAME leaves RST on the bus until the next SCMD write with SCTL[7] clear.
+- A received byte goes into the FIFO together with ACK, after MAME's 10-clock delay. MAME pushes it when it sees REQ, 10 clocks before ACK. In that window, software that has already read the last byte still sees the target's REQ for it. NetBSD's `spc_datain_pio` returns as soon as it has its n bytes. `spc_intr` then finds REQ up in DATA IN and starts a zero-length transfer in the middle of the handshake, which hangs the bus. `tb_scsi_dma` catches this with a fast CPU.
 
 ### Not implemented
 
@@ -406,6 +410,19 @@ The bench was mutation-checked; each of these mutations makes it fail:
 - CD side: no unit attention, no ×4 LBA conversion at 2048, no 150-frame pregap in MSF, no RMB bit, MODE SELECT accepting 1024, CD writable, READ CAPACITY block length stuck at 512.
 
 The shared engine (2026-10-14) was mutation-checked as well; each of these makes the bench fail: sense in one shared slot, the read or the write request raised on unit 0's line whatever the unit, the CD flag applied to every unit, the buffer following unit 0's `sd_ack`, the image size, read-only or mounted state taken from unit 0 / any unit, unit attention and block length reset by any unit's mount, MODE SELECT changing a disk's block length, `cur` not latched at selection, the MSF recomputed on any mount, the unit attention cleared on the wrong unit, an absent ID answering selection, and the request interlock checking only the connected unit.
+
+`tb/tb_scsi_dma.sv` puts the whole card (`hp98265a`) and the 98620 (`hp98620`) on a memory model. It is driven first like the boot ROM, with a READ(10) by DMA on channel 0, polled. Then it is driven like NetBSD 9:
+- `spc_dio_attach` and `spc_init`;
+- HP-UX's RST release through SCTL = 0xC0;
+- the probe of IDs 0-2: TEST UNIT READY, REQUEST SENSE by NetBSD's exact `spc_datain_pio` loop, and a 36-byte INQUIRY by longword DMA on channel 1;
+- STATUS and MESSAGE IN read from TEMP before SET ACK.
+
+The bench runs at 2 clocks per register access, and again at 10 clocks per access.
+
+It catches three bugs, each when that fix is reverted:
+- the 98620 sampling the first byte of a DMA read on the previous channel (INQUIRY byte 0 = 0xFF);
+- the early FIFO push;
+- RST not released by SCTL[7].
 
 Run it with:
 
