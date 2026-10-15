@@ -45,6 +45,7 @@ quartus_build*.log
 # --- Simulation (verilator / iverilog) --------------------------------------
 verilator/obj_dir
 verilator/obj_dir_*/
+verilator/obj_fast/
 verilator/*.png
 verilator/*.out
 verilator/*.err

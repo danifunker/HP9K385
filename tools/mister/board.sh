@@ -27,14 +27,14 @@ CORE_DIR="${CORE_DIR:-/media/fat/_Unstable}"
 GAMES="${GAMES:-/media/fat/games/HP9K385}"
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
-rsh() { ssh -o BatchMode=yes -o ConnectTimeout=10 "$MISTER" "$@"; }
+rsh() { ssh -o LogLevel=ERROR -o BatchMode=yes -o ConnectTimeout=10 "$MISTER" "$@"; }
 
 cmd="${1:-}"; shift || true
 case "$cmd" in
 push)
     rbf="$1"
     rsh "mkdir -p '$CORE_DIR'"
-    scp -q -o BatchMode=yes "$rbf" "$MISTER:$CORE_DIR/HP9K385.rbf"
+    scp -q -o LogLevel=ERROR -o BatchMode=yes "$rbf" "$MISTER:$CORE_DIR/HP9K385.rbf"
     l=$(md5sum < "$rbf" | cut -d' ' -f1); r=$(rsh "md5sum < '$CORE_DIR/HP9K385.rbf'" | cut -d' ' -f1)
     [ "$l" = "$r" ] || { echo "md5 mismatch: $l vs $r" >&2; exit 1; }
     echo "pushed $rbf -> $CORE_DIR/HP9K385.rbf ($l)"
@@ -47,7 +47,7 @@ games)
         l=$(md5sum < "$f" | cut -d' ' -f1)
         r=$(rsh "[ -f '$GAMES/$n' ] && md5sum < '$GAMES/$n'" | cut -d' ' -f1 || true)
         if [ "$l" = "$r" ]; then echo "same     $n"; continue; fi
-        scp -q -o BatchMode=yes "$f" "$MISTER:$GAMES/$n"
+        scp -q -o LogLevel=ERROR -o BatchMode=yes "$f" "$MISTER:$GAMES/$n"
         r=$(rsh "md5sum < '$GAMES/$n'" | cut -d' ' -f1)
         [ "$l" = "$r" ] || { echo "md5 mismatch on $n" >&2; exit 1; }
         echo "copied   $n"
