@@ -425,18 +425,18 @@ endfunction
 // pattern bytes for the four pixels of the destination longword
 // One RAM per plane.  The mover reads row dy of all eight at once; the host
 // uses the read port when the mover is idle (a host read of a pattern
-// register during a window move returns the mover's row; host writes are
-// whole words in practice, a partial one merges with what the port reads).
+// register during a window move returns the mover's row).
 wire [15:0] pat_q [0:7];
 wire        pat_we   = reg_cs && reg_we && pat_host && |tcwen[reg_word[8]];
 wire  [4:0] pat_ha   = {reg_word[8], reg_word[3:0]};
 genvar gl, gp;
 generate for (gp = 0; gp < 8; gp = gp + 1) begin : g_patram
-	(* ramstyle = "MLAB, no_rw_check" *) reg [15:0] pat [0:31];
+	// high and low bytes apart, so a byte write needs no read-modify-write.
+	// Separate modules: Quartus 17 won't infer a RAM declared in a generate.
 	wire [4:0] ra = wm_busy ? {m_bank, dy[3:0]} : pat_ha;
-	assign pat_q[gp] = pat[ra];
-	always @(posedge clk)
-		if (pat_we && reg_word[6:4] == gp) pat[pat_ha] <= combine(pat_q[gp], reg_din, reg_be);
+	wire       pw = pat_we && reg_word[6:4] == gp;
+	catseye_patram u_hi(.clk(clk), .we(pw && reg_be[1]), .wa(pat_ha), .d(reg_din[15:8]), .ra(ra), .q(pat_q[gp][15:8]));
+	catseye_patram u_lo(.clk(clk), .we(pw && reg_be[0]), .wa(pat_ha), .d(reg_din[7:0]),  .ra(ra), .q(pat_q[gp][7:0]));
 end endgenerate
 assign pat_host_q = pat_q[reg_word[6:4]];
 
@@ -659,4 +659,19 @@ always @(posedge clk) begin
 	endcase
 end
 
+endmodule
+
+// 32 x 8 MLAB, synchronous write, asynchronous read
+module catseye_patram
+(
+	input        clk,
+	input        we,
+	input  [4:0] wa,
+	input  [7:0] d,
+	input  [4:0] ra,
+	output [7:0] q
+);
+(* ramstyle = "MLAB, no_rw_check" *) reg [7:0] m [0:31];
+assign q = m[ra];
+always @(posedge clk) if (we) m[wa] <= d;
 endmodule
