@@ -566,3 +566,17 @@ Card registers (phys 0x6E0000): +1 ID, +3 control, +7 configuration switches. SP
 | INTS bit 0 (bus reset seen) | handled; `+7 & 0x80` set gives the benign "Spurious RST" path | the core never sets INTS bit 0 | OK (no reset interrupt storm) |
 
 None of these blocks the code before "Disk Information:". The RST mismatch is the one to fix before the root mount, because it is the first thing `vfs_mountroot`'s SCSI traffic meets.
+
+## 8. The stop after "Networking memory ..." was a level-5 interrupt storm (found in sim, 2026-10-15)
+
+The board build with the §1-§3 fixes stopped after `Networking memory for fragment reassembly is restricted to 671744 bytes`. A full-system sim of the same disk (fast SCSI selection time-out build, `--vram-latency 12`, the I/O event log on) showed what the static analysis could not:
+
+- From about 440M clocks every PC sample was in `_Interrupt`, `_dio_IRQ`, `_splnet`, or the `ki_accum_*` interrupt accounting.
+- The event log had 226,808 vector-29 (level 5) exceptions in about 80M clocks, against 7,517 normal level-6 clock interrupts.
+
+How the storm comes about:
+- **The driver init.** The 98626 driver had programmed the 8250 for 9600 baud (DLL 0x10), set IER = 0x0A (THRE and modem-status interrupts), and written the card's control word at +2 = 0x0080 (interrupt enable).
+- **The dispatcher check.** `_dio_IRQ` claims a level-5 interrupt for the card only when the control byte (+3, a byte read) has bits 7 *and* 6 set. It read 0xA0 (enable and level 5, but no "interrupt requested" bit), so it never called the driver.
+- **The result.** The 8250's interrupt was never serviced, and the level-triggered request re-entered at once.
+
+The fix (`rtl/hp98644.sv`) is to make bit 6 follow the 8250's INTR in both bytes. MAME's 98644 leaves the interrupt unwired, so MAME never shows this. The 98265A already reports its bit 6 (`spc_irq`).
