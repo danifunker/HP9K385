@@ -24,7 +24,9 @@
 //  Memory side: one byte per request through the system bus (the parent
 //  turns it into a byte-lane beat); a bus error stops the channel.
 //  Device side: dack_rd / dack_wr pulse once per byte, dack_rdata is
-//  sampled in the same cycle as dack_rd.
+//  sampled in the same cycle as dack_rd (not before: the card answers by
+//  dack_ch, which changes with dack_rd, and a channel whose DE bit is clear
+//  reads $FF).
 //============================================================================
 
 module hp98620
@@ -112,7 +114,7 @@ end
 //----------------------------------------------------------------------------
 // Transfer engine: pick a channel, move one byte, account for it
 //----------------------------------------------------------------------------
-localparam X_IDLE = 2'd0, X_MEM = 2'd1, X_DEV = 2'd2;
+localparam X_IDLE = 2'd0, X_MEM = 2'd1, X_DEV = 2'd2, X_RD = 2'd3;
 reg  [1:0] xs;
 reg        ch;                      // channel being served
 wire       want0 = armed[0] && dmar[0];
@@ -205,10 +207,15 @@ always @(posedge clk) begin
 			else begin
 				// in: take the byte from the device, then write memory
 				dack_rd <= 1'b1;
-				mwdata  <= dack_rdata;
-				mreq    <= 1'b1; mwe <= 1'b1; maddr <= addr[!want0];
-				xs      <= X_MEM;
+				xs      <= X_RD;
 			end
+		end
+		X_RD: begin
+			// sample with dack_rd: dack_ch now names this channel, not the
+			// one served before (NetBSD's first INQUIRY byte read $FF)
+			mwdata <= dack_rdata;
+			mreq   <= 1'b1; mwe <= 1'b1; maddr <= addr[ch];
+			xs     <= X_MEM;
 		end
 		X_MEM: if (mack || merr) begin
 			mreq <= 1'b0;
@@ -231,7 +238,6 @@ always @(posedge clk) begin
 			count(ch);
 			xs <= X_IDLE;
 		end
-		default: xs <= X_IDLE;
 		endcase
 	end
 end

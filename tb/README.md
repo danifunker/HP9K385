@@ -38,6 +38,10 @@ The bench was mutation-checked on 2026-10-14. A swapped rule-index order and off
 | Bench | Status | Run |
 |---|---|---|
 | `tb_scsi.sv` | **passes**. One MB87030 and one `scsi_target` with four units (disks on IDs 0 and 1, a CD-ROM on ID 2, ID 3 without an image) on an ORed bus, each unit with an hps_io-timed block model on a shared `sd_buff_*` bus. Covers selection with ATN and IDENTIFY, INQUIRY, TEST UNIT READY, READ CAPACITY, DMA READ and WRITE(10), READ(6), MODE SENSE, sense paths, NOT READY on the empty disk, the CD-ROM (unit attention, 512/2048 blocks, READ TOC/MSF), commands alternating between units with image, sense, read-only, unit attention and block length kept per unit, SCSI RST with a block request pending, and selection timeout. 15 mutations of the shared engine were checked; all are caught (see `docs/reference/scsi.md`). | `verilator --binary --timing -Wno-fatal -Wno-WIDTH --top-module tb_scsi --Mdir build/obj_tb_scsi -o tb tb/tb_scsi.sv rtl/scsi/mb87030.sv rtl/scsi/scsi_target.sv && build/obj_tb_scsi/tb` |
+| `tb_scsi_dma.sv` | **passes**. The whole card (`hp98265a`) with the 98620 (`hp98620`) and a memory model, driven like the boot ROM (a READ(10) by DMA on channel 0, polled) and then like NetBSD 9 (`spc_dio_attach`/`spc_init`, then the probe of IDs 0-2: TEST UNIT READY, REQUEST SENSE by NetBSD's exact PIO loop, a 36-byte INQUIRY by longword DMA on channel 1 with STATUS/MESSAGE IN read from TEMP). Also covers HP-UX's RST release by SCTL = 0xC0, and a fast CPU on REQUEST SENSE. Each of the three fixes it was written for fails the bench when reverted:
+- the 98620 took the first byte of a DMA read after a channel change as $FF (NetBSD's `scsipi_dtype` panic, OpenBSD's "31/vendor-unique");
+- the SPC pushed a received byte before ACK, so NetBSD saw REQ still up after the last byte;
+- RST stayed on the bus through SCTL[7]. Uses `tb_blkdev` from `tb_scsi.sv`. | `verilator --binary --timing -Wno-fatal -Wno-WIDTH --top-module tb_scsi_dma --Mdir build/obj_tb_scsi_dma -o tb tb/tb_scsi_dma.sv tb/tb_scsi.sv rtl/hp98265a.sv rtl/hp98620.sv rtl/scsi/mb87030.sv rtl/scsi/scsi_target.sv && build/obj_tb_scsi_dma/tb` |
 
 ## Serial
 

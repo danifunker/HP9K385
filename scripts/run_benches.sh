@@ -20,6 +20,7 @@ uart8250|verilator|tb/tb_uart8250.sv rtl/uart8250.sv
 vram_ddr3|iverilog|tb/tb_vram_ddr3.sv rtl/vram_ddr3.sv
 ps2_hil_keymap|iverilog|tb/tb_ps2_hil_keymap.sv rtl/ps2_hil_keymap.sv
 scsi|verilator|tb/tb_scsi.sv rtl/scsi/mb87030.sv rtl/scsi/scsi_target.sv
+scsi_dma|verilator|tb/tb_scsi_dma.sv tb/tb_scsi.sv rtl/hp98265a.sv rtl/hp98620.sv rtl/scsi/mb87030.sv rtl/scsi/scsi_target.sv
 wombat_bus32|verilator|tb/tb_wombat_bus32.sv rtl/wombat/wombat_bus32.sv
 upi41_diff|verilator|tb/tb_upi41_diff.sv tb/upi41_ref.sv rtl/upi41.sv
 "
