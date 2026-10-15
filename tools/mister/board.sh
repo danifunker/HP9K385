@@ -56,6 +56,7 @@ games)
 load)
     rsh "echo 'load_core $CORE_DIR/HP9K385.rbf' > /dev/MiSTer_cmd"
     echo "load_core $CORE_DIR/HP9K385.rbf"
+    echo "(prefer the OSD: the user asked that cores be loaded through the menu)" >&2
     ;;
 menu)
     rsh "echo 'load_core /media/fat/menu.rbf' > /dev/MiSTer_cmd"

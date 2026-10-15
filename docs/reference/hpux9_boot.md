@@ -381,6 +381,188 @@ The ID byte at 0x5F400E (§2) is cosmetic but cheap.
   - Header: magic 0x020C/0x0108, shared text. Text is 0x110DE8 bytes, loaded at 0. Data is 0x1E590 bytes at 0x111000. BSS is 0x26090 bytes. Entry is 0x972.
   - The symbol table follows the data. Each entry is `{value.l, type.b, namelen.b, almod.w, unit.w, name[namelen]}`, with no terminator; 5292 symbols.
 - **`tools/kdis.py`:** runs `unidasm -arch m68040` per function and annotates absolute operands with symbols. `kdis.py all > hp-ux.lst` gives the full listing; `kdis.py SYMBOL` shows one function.
+- **`tools/callgraph.py`:** a static call graph over `hp-ux.lst` (direct `bsr`/`jsr` only). `callgraph.py ROOT… -d DEPTH -t TARGET,…` prints the call paths from the roots to the targets.
+- **`syshpux.bin` / `syshpux.lst`:** the LIF secondary loader (SYSHPUX, loaded at 0xFFFF0800). It loads the kernel at `$fdce` + the boot ROM global at `(A4)+$14`, rounded up to a page.
 - **Extracted files:**
   - `hp-ux`, `text.bin`, `data.bin`, `hp-ux.syms`, `hp-ux.lst`;
   - `conf/`, a copy of `/etc/conf` with the kernel headers, `conf.c` and `dfile`.
+
+## 7. The hang after "Networking memory for fragment reassembly…" (2026-10-15)
+
+**Board symptom.** The I/O configuration prints, then `Networking memory for fragment reassembly is restricted to 671744 bytes`, then nothing for more than 90 s. There is no panic, and the cursor sits at the start of the next line.
+
+The 671744 figure is consistent with 8 MB of RAM: `netmemmax` = 10 % of `maxmem` (about 1636 free pages after the kernel) [V].
+
+### 7.1 What runs after that message, in order [V]
+
+The message comes from `netmem_init`, called from `mbinit`. `main` calls `mbinit` through the `netproc[0x20]` hook, right after `clkstart` (the YO/PTM set-up of §1) and `cinit`.
+
+`main` continues:
+
+| Step | Call | Prints | Hardware |
+|---|---|---|---|
+| 1 | `netproc[0x20]` = `mbinit` → `netmem_init` | the networking-memory line | none |
+| 2 | `netproc[0x30]` = `ntimo_init` | — | none (`kmalloc`) |
+| 3 | `netproc[0x10]` = `ifinit` | — | none; loopback `if_init`, `if_slowtimo` → `net_timeout` → `timeout()` |
+| 4 | `netproc[0x0c]` = `domaininit` | — | none; protocol `pr_init`s, `pffasttimo`/`pfslowtimo`, `nm_init` |
+| 5 | `ihinit`, cdfs hook (`_cdfs_nop`), `bhinit` | — | none (`kmalloc`) |
+| 6 | `binit` | — | none; buffer cache, `dbc_kdget`/`bfget`, page-table pages zeroed with `MOVE16` (`pg_zero*`) |
+| 7 | **`printf("\nDisk Information:\n")`** | **the next line we should see** | console |
+| 8 | `rootinit` | `    Root device major is 7, minor is 0xe0000, root site is 0` | the driver `dev_init` chain (`scsi_init` builds rootdev from the MSUS; no bus traffic) |
+| 9 | `spl0()` | — | **first point where level 1-6 interrupts can be taken** |
+| 10 | `bswinit`, `dnlc_init`, `msginit`, `seminit`, `shminit`, `privgrp_init`, `mounthashinit`, `find_root` | — | — |
+| 11 | `vfs_mountroot` | (`mounting root fs RD_ONLY` only in the read-only case) | **first disk I/O**: INQUIRY, TEST UNIT READY, READ CAPACITY, superblock reads |
+| 12 | `swapinit`, `dumpconf`, `init_kvm`, … | `    Swap device table: …`, `\nMemory Information:\n`, `    Physical: … Kbytes, lockable: …, available: …`, `    Using N buffers containing N Kbytes of memory.` | |
+| 13 | fork `init` | `/etc/bcheckrc` output on the console | |
+
+`_start` sets SR = 0x2600, and the first `spl0()` is step 9. Steps 1-8 therefore run at **IPL 6**. The panic in §1 confirms it (IL=6 inside `clkstart`).
+
+The kernel `printf` is synchronous: `putchar` calls the console tty's output routine directly when `cons_up` is set.
+
+### 7.2 Where it can be stuck
+
+From step 1 to step 7:
+
+- Nothing touches the SCSI card, the DMA controller or the disk.
+- No interrupt of level 1-6 can be taken. The PTM/YO tick, the 98265A at level 4, the HIL at level 1 and the DMA at its programmed level are all masked.
+- The only hardware these routines touch is the console (`printf`) and, through `purge_dcache`/`purge_tlb`, the 0x5F4000 block, which is RAM-like in the core.
+
+So **none of the interrupt candidates (SCSI interrupt, DMA done, clock tick, HIL) can explain a stop before "Disk Information:"**. If the board really never shows "Disk Information:", the CPU is stuck in one of the following:
+
+1. **A sleep in the memory allocator.** `kmalloc` → `alloc_reserve` → `sleep_then_unlock` → `sleep`, and `binit` → `dbc_kdget` → `allocpfd` → `sleep`. A sleep this early switches to the idle loop at IPL 0. The clock then runs, but nobody ever frees memory.
+2. **A tight loop or a bus cycle that never terminates, at IPL 6.** Examples:
+   - an instruction the CPU core gets wrong in `kmalloc`, `hdl_addtrans`, `vm_alloc_tables` or `pg_zero*` (`MOVE16 (xxx).L,(A0)+` from the zero line `gap_pgzero`);
+   - an access the core decodes but never acknowledges.
+3. **The console.**
+   - The `\n` that starts "Disk Information" moves the cursor. `bobcat_cursor` polls STATUS bit 0 (§3); a mover stuck busy would spin forever.
+   - A scroll happens only if the cursor is already on row 51. With about 15-20 kernel lines on a cleared screen it should not be.
+   - Every glyph before this point waited on the same bit successfully, so this is the least likely of the three.
+
+**How to tell 1 from 2 or 3, on the board without a rebuild.**
+
+- HP-UX drives the 8 diagnostic LEDs (the latch at 0x1FFFF): `led_init` maps them, and `hardclock` calls `display_led_activity` → `update_leds`.
+  - If the LEDs change while the console is frozen, clock interrupts are running: the kernel is asleep (case 1) or got past `spl0`.
+  - If the LEDs stay at whatever the boot ROM or loader left, the clock never ran: the CPU is spinning at IPL 6 or stuck on a bus cycle (case 2 or 3).
+- A second check: Caps Lock. The HIL driver lights the LED from its level-1 interrupt, which is masked at IPL 6.
+- The next step is a PC sample: an OSD or debug readout of the CPU PC, or a Verilator run with `--vram-latency` set to the board's frame-buffer latency up to this point. The PC lands in one of the functions in the table above.
+
+Confidence:
+
+- High: the order of the calls and that the next expected line is "Disk Information:".
+- High: no device interrupt can matter before step 9.
+- Low: *which* of 1-3 it is. Static analysis cannot settle it; the LED check does.
+
+### 7.3 The clock path against `rtl/ptm6840.sv` [V]
+
+What HP-UX programs and reads (phys 0x5F8000, odd bytes; rs = (offset−1)/2):
+
+| Who | Access | Meaning |
+|---|---|---|
+| `snoozeinit` | `movep.w $FFFF → +5/+7`; +3 = 1; +1 = 0 | T1 latch FFFF; CR2 bit 0 = 1 → CR1 = 0. T1 runs free on C1 (250 kHz), 16-bit, no IRQ. Used by `snooze()`/`get_4_usec_tick()`, which read the T1 counter with `movep.w +5/+7` (MSB, then the LSB buffer). |
+| `snoozeinit` | `isrlink(clkrupt, 6, 0x5F8003, mask 0x80, value 0x80)` | The level-6 dispatcher reads the status register and needs bit 7 (composite IRQ). |
+| `clkstart` | `movep.w $FFFF → +9` (T2 latch); +3 = 1, +1 = 0, +3 = 1, +1 = 0, +3 = 0, +1 = 0xC4 | CR2 ends 0x00: T2 on C2 = O3, 16-bit, no IRQ. CR3 = 0xC4: output on, IRQ on, **dual 8-bit**, external C3. T3 latch (`movep.w +D/+F`) = 0x1309 with YO, giving 1250 Hz. |
+| `_YO_handler` (vector $78) | `btst #2,+3`; then `tst.b +D` | Status read with the T3 flag set, then a T3 MSB read, which clears the flag. 24 of 25 interrupts end with `rte`. |
+| `_Interrupt` → `clkrupt` | status read (dispatcher); +3 = 0, +1 = 0x84; `movep.w +D` (T3); `movep.w +5` (T1); `movep.w +9` (T2); … +1 = 0xC4 | IRQ off while it runs. The T3 counter read clears the flag. T2 counts O3 periods; with YO the delta is divided by 25. IRQ back on at the end. |
+
+`ptm6840.sv` implements all of this:
+
+- rs map 1/3/5/…/F;
+- status = {any_irq, 0000, flags};
+- clearing the flag with a status read followed by a counter-MSB read (`flag_seen`);
+- dual 8-bit timing (M+1)·(L+1);
+- O3 → C2 falling edges;
+- external clocks at 250 kHz;
+- the CR1 internal reset.
+
+**No mismatch found.** Once `spl0` runs, the clock interrupt should be delivered and cleared correctly. Level 6 = PTM in the core's priority encoder (`irq_lvl[6]`).
+
+### 7.4 SCSI read path (98265A + MB87030 + 98620C), against the core
+
+Card registers (phys 0x6E0000): +1 ID, +3 control, +7 configuration switches. SPC register *n* is at +0x21+2*n*:
+
+| Offset | Register |
+|---|---|
+| +21 | BDID |
+| +23 | SCTL |
+| +25 | SCMD |
+| +27 | TMOD |
+| +29 | INTS |
+| +2B | PSNS |
+| +2D | SSTS |
+| +2F | SERR |
+| +31 | PCTL |
+| +37 | TEMP |
+| +39/+3B/+3D | TC high/mid/low |
+
+**Set-up, once, from `kernel_initialize` → `scsi_if_init`, before the "Networking" line [V]:**
+
+1. Level = ((+3 & 0x30) >> 4) + 3. The core returns 01 there, so the level is 4.
+2. `isrlink(scsi_if_isr, 4, +3, mask 0xC0, value 0xC0)`: the card counts as interrupting only when **IE (bit 7) and "interrupt" (bit 6) are both set**.
+3. `scsi_if_reset_bus`, in order:
+   1. +3 = 0
+   2. SCTL = 0
+   3. SCMD = 0x10 (RST)
+   4. `snooze(30)`
+   5. SCTL = 0xC0
+   6. SCMD = TMOD = PCTL = TEMP = TC = INTS = 0
+   7. +3 = 0x80
+   8. SCTL = 0x93 (| 0x08 if +7 bit 3 = parity)
+   9. BDID = ~(+7) & 7
+   10. SCTL &= 0x7F → 0x13/0x1B
+4. `snooze(1 000 000)`: one second on the T1 counter.
+5. If (+1 & 0x20) == 0, the kernel requires a 98620C (`dma_here` == 3) and sets "32-bit DMA OK"; otherwise it panics "Illegal SCSI configuration: no DMA". The core's ID 0x07 and DMA ID "20C" take the 32-bit path.
+
+**Select (`scsi_if_select`):**
+
+1. If SSTS & 0xE0, wait for bus free.
+2. If INTS & 0x20, write INTS = 0x20.
+3. PCTL = 0.
+4. TEMP = (1<<target) | (1<<own ID).
+5. Optionally SCMD = 0x60 (set ATN).
+6. TCH/TCM/TCL = 3/0x0E/4 (selection time-out).
+7. **SCMD = 0x20** (select).
+8. Completion arrives as the level-4 interrupt.
+
+**DMA read (`scsi_if_transfer`, case "DMA") [V]:**
+
+1. `dma_build_chain`: one entry per physical 4 KB page, merged when contiguous.
+   - Each entry's control is the driver's template: `scsi_if_dma_setup` → **0x41** = IE + level field 4. Then:
+     - bit 2 (OUT) for writes;
+     - bit 3 (PRI) when flags & 4;
+     - **0x8100** (START + longword) when the buffer and count are 4-byte aligned on a 98620C;
+     - bit 1 (word) for word mode.
+   - Count = bytes/4 − 1 (or /2, /1).
+   - **The last entry has IE cleared** (`dma_setup(…, 1)`).
+2. SPC TC = byte count (24 bits); PCTL = PSNS & 7.
+3. Card +3 = 0x80 | (read ? 0x04 : 0) | (32-bit ? 0x08 : 0) | (channel 0 ? 0x01 : 0x02).
+4. **SCMD = 0x80** (transfer, DMA mode).
+5. `dma_start`:
+   - 32-bit: `move.l addr → 0x500100`, `move.l count → 0x500104`, `move.w ctrl → 0x500108` (START arms). Channel 1 uses +0x200.
+   - Otherwise legacy: `move.l addr → +0`, `move.w count → +4`, **`move.b ctrl_lo → +7`** (arms).
+6. **Between pages** the channel interrupts at **level 7**. In MAME's and the core's encoding, level = 3 + bits 6:4 = 7. That is deliberate: `_lev7int` is the chain engine.
+   1. It tests DMA status +7 bit 1.
+   2. It reads +0 with `tst.w`, which clears irq/armed.
+   3. It writes the next entry's address, count and control (32-bit set at +0x100…, legacy at +0/+4/+6).
+   4. It executes `rte`.
+7. **End of transfer:** the SPC's "command complete" (INTS bit 4) raises card bit 6. With IE that is the level-4 interrupt, handled by `scsi_if_isr`:
+   1. reads INTS, TEMP and SERR;
+   2. **writes the INTS value back** to clear it;
+   3. calls `scsi_if_dmaisr` → `dmaend_isr`. This reads DMA +0 (clear) and +4 (residual count; 0xFFFF = done), then sets +3 &= 0xFC (drop the DMA enables), reads the SPC TC residue, and clears +7 (`clr.b`).
+
+**Comparison with `hp98265a.sv`, `hp98620.sv` and `mb87030.sv`:**
+
+| Item | HP-UX expects | Core | Verdict |
+|---|---|---|---|
+| Card level / IE / IRQ bit | +3 bits 5:4 = level-3, bit 7 IE, bit 6 = SPC IRQ; IRQ only if IE | `{control[7], spc_irq, 2'd1, control[3:0]}`, `irq = control[7] && spc_irq`, level 4 | OK |
+| DMA channel select | +3 bit 0 = channel 0, bit 1 = channel 1 | `dmar`/`de_ok` gated by control[1:0] | OK |
+| +3 bits 2/3 (direction, 32-bit) | written | stored (mask 0x8F), no effect | OK: the core DMA moves bytes and counts units |
+| +7 write (`clr.b`) | after each interrupt | ignored | OK as far as the driver needs |
+| DMA level 7 for chaining | control 0x41 → level 7; `lev7int` re-arms | `irq_lvl[3 + ctrl[6:4]]`; level 7 edge re-armed in AP68040 (`nmi_arm`) | OK |
+| DMA status / clear | +7 bit 1 = irq; read +0 clears | `{irq, armed}` at +6; read +0 clears irq and armed | OK |
+| 98620C 32-bit registers | +0x100/+0x104 longs, +0x108 START | implemented; long writes split into words | OK |
+| Residual count | +4 reads −1 (0xFFFF) when done | `tc` runs to −1 | OK |
+| Legacy control written as a **byte** to +7 | low byte only | `10'h006: arm(…, reg_din)` ignores `reg_be`; the high byte comes in as 0 (the bus does not replicate bytes), so the longword bit is clear | harmless today; a merge with `reg_be` would be cleaner |
+| **Bus reset release** | real MB87030: SCTL bit 7 (reset & disable) drops RST, so RST lasts about 30 µs | `mb87030.sv` releases RST only on an SCMD write while SCTL bit 7 is 0. HP-UX's SCMD = 0 comes while SCTL = 0xC0, so **RST stays asserted on the bus from `scsi_if_init` until the first selection's SCMD write**, and the targets sit in reset (`scsi_target`: `if (reset \|\| scsi_rst_i)`) | **mismatch** (medium). Fix: drop RST and clear SCMD/INTS state whenever SCTL bit 7 is set. Effect today: the first selection drops RST in the same write that starts arbitration, with the target leaving reset one clock later. Probably survivable, but not what real hardware does. |
+| INTS bit 0 (bus reset seen) | handled; `+7 & 0x80` set gives the benign "Spurious RST" path | the core never sets INTS bit 0 | OK (no reset interrupt storm) |
+
+None of these blocks the code before "Disk Information:". The RST mismatch is the one to fix before the root mount, because it is the first thing `vfs_mountroot`'s SCSI traffic meets.
