@@ -60,11 +60,15 @@ V_WARN = -Wno-fatal -Wno-WIDTH -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC -Wno-IMPLICIT \
 # becomes a no-op (found in the NeXT-Color core, noted in the Quadra Makefile).
 V_OPT = -O3 --x-assign fast --x-initial fast --noassert --unroll-count 256 \
 	--trace-fst --threads 1
-V_FLAGS = -cc --exe --build -j 0 --Mdir obj_dir --top-module hp385_top \
-	+define+SIMULATION=1 -I$(AP) $(V_WARN) $(V_OPT) \
+# MDIR / V_DEFS: a second build with extra defines, e.g.
+#   make MDIR=obj_fast V_DEFS=+define+SIM_FAST_SELTO   (1/64 SCSI selection time-out)
+MDIR   ?= obj_dir
+V_DEFS ?=
+V_FLAGS = -cc --exe --build -j 0 --Mdir $(MDIR) --top-module hp385_top \
+	+define+SIMULATION=1 $(V_DEFS) -I$(AP) $(V_WARN) $(V_OPT) \
 	-CFLAGS "-O2 -g" -o Vhp385_top
 
-EXE = obj_dir/Vhp385_top
+EXE = $(MDIR)/Vhp385_top
 
 all: $(EXE)
 

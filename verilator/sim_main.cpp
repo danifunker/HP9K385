@@ -25,6 +25,9 @@
 //   --log FILE         event log (default stdout)
 //   --pc-trace FILE    one line per instruction dispatch: cycle pc opcode sr
 //   --pc-trace-max N   stop the PC trace after N lines
+//   --vram-trace FILE  one line per CPU access to the 98550 frame buffer
+//                      ($200000-$3FFFFF): cycle pc R/W address be data acntl
+//   --vram-trace-from CYC  ... starting at clock CYC
 //   --stop-pc ADDR     stop when an instruction at ADDR is dispatched (hex)
 //   --loop-window N    stall/stuck-loop detector window in clocks (default 2M; 0 off)
 //   --fst FILE         FST waveform, from --fst-start for --fst-cycles clocks
@@ -283,7 +286,8 @@ static const char *region_name(uint32_t a) {
 int main(int argc, char **argv) {
 	Verilated::commandArgs(argc, argv);
 	const char *rom_path = nullptr, *card_path = nullptr, *log_path = nullptr;
-	const char *pct_path = nullptr, *fst_path = nullptr, *snap_path = nullptr;
+	const char *pct_path = nullptr, *fst_path = nullptr, *snap_path = nullptr, *vrt_path = nullptr;
+	uint64_t vrt_from = 0;
 	const char *hil_path = nullptr, *hilt_path = nullptr, *mlct_path = nullptr;
 	const char *disk_path[3] = {nullptr, nullptr, nullptr};
 	uint64_t snap_every = 0;
@@ -315,6 +319,8 @@ int main(int argc, char **argv) {
 		else if (a == "--log") log_path = next();
 		else if (a == "--pc-trace") pct_path = next();
 		else if (a == "--pc-trace-max") pct_max = strtoull(next(), nullptr, 0);
+		else if (a == "--vram-trace") vrt_path = next();
+		else if (a == "--vram-trace-from") vrt_from = strtoull(next(), nullptr, 0);
 		else if (a == "--stop-pc") stop_pc = strtoll(next(), nullptr, 16);
 		else if (a == "--mem-model") { std::string m = next(); mem_sdram = (m == "sdram");
 			if (m != "sdram" && m != "ideal") { fprintf(stderr, "--mem-model: ideal or sdram\n"); return 1; } }
@@ -365,6 +371,7 @@ int main(int argc, char **argv) {
 
 	FILE *log = log_path ? fopen(log_path, "w") : stdout;
 	FILE *pct = pct_path ? fopen(pct_path, "w") : nullptr;
+	FILE *vrt = vrt_path ? fopen(vrt_path, "w") : nullptr;
 	FILE *hilt = hilt_path ? fopen(hilt_path, "w") : nullptr;
 	FILE *mlct = mlct_path ? fopen(mlct_path, "w") : nullptr;
 	if (!log || (pct_path && !pct)) { perror("log"); return 1; }
@@ -472,6 +479,11 @@ int main(int argc, char **argv) {
 			}
 			if (stop_pc >= 0 && pc == (uint32_t)stop_pc) { stop_reason = "stop-pc"; break; }
 		}
+
+		if (vrt && CATS(cpu_ack) && cycle >= vrt_from)
+			fprintf(vrt, "%llu %08X %c %06X be=%X %08X acntl=%04X\n", (unsigned long long)cycle, pc,
+			        CATS(cpu_we) ? 'W' : 'R', 0x200000 + ((uint32_t)CATS(cpu_addr) << 2), CATS(cpu_be),
+			        CATS(cpu_we) ? CATS(cpu_wdata) : CATS(cpu_rdata), CATS(acntl));
 
 		// in_exc rises as stacking starts; the vector/frame registers are
 		// settled a few clocks later

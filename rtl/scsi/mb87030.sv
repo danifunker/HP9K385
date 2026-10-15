@@ -170,7 +170,13 @@ assign scsi_data_o = (scsi_io_i && !bctl[0]) ? 8'h00 : odata;
 assign irq = sctl[0] && (ints != 8'h00);
 
 // selection time-out in chip clocks: ((TC & ~0xFF) + 15) * 2
+// (SIM_FAST_SELTO, the full-system sim only: 1/64 of that, so the boot
+// ROM's scan past empty IDs takes ~1.3M clocks instead of ~83M)
+`ifdef SIM_FAST_SELTO
+wire [25:0] sel_to = {7'd0, tc[23:8], 3'b001};
+`else
 wire [25:0] sel_to = {1'b0, tc[23:8], 8'h0F, 1'b0};
+`endif
 
 // DMA request; corrected for an acknowledge in this very cycle
 wire [4:0] out_pend = {1'b0, fcnt} + {4'd0, inflight} + {4'd0, dack_wr};
