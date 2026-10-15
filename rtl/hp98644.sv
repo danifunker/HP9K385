@@ -5,7 +5,8 @@
 //
 //  Registers (16-bit words; the 8250 on the low byte of words 8-15):
 //    +$00  read $02 (ID) / write: card reset
-//    +$02  control: bit 7 IE; reads IE in both bytes | (level-3) << 4
+//    +$02  control: bit 7 IE; reads IE and bit 6 = interrupt requested in
+//          both bytes | (level-3) << 4
 //    +$11..+$1F  8250 register n at +$10 + 2n + 1
 //  Interrupt level 5 (switch default).  2.4576 MHz baud crystal.
 //============================================================================
@@ -61,7 +62,11 @@ always @(*) begin
 	if (is_uart) reg_dout = {8'hFF, uart_dout};
 	else case (reg_off[3:1])
 	3'd0: reg_dout = 16'h0002;
-	3'd1: reg_dout = {ie, 7'd0, ie, 1'b0, 2'd2, 4'd0};
+	// bit 7 IE, bit 6 interrupt requested (the 8250's INTR), 5:4 level - 3.
+	// HP-UX's dispatcher claims a level-5 interrupt for this card only when
+	// bits 7 and 6 are both set; without bit 6 it never ran the driver and
+	// level 5 stormed (MAME leaves the 98644's interrupt unwired).
+	3'd1: reg_dout = {ie, uart_int, 6'd0, ie, uart_int, 2'd2, 4'd0};
 	default: reg_dout = 16'hFFFF;
 	endcase
 end
