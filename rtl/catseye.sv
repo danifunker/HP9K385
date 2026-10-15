@@ -183,7 +183,9 @@ always @(*) begin
 	11'h38A: reg_dout = tcren[1] == 8'hFF ? 16'h0 : acntl;
 	11'h38B: reg_dout = tcren[1] == 8'hFF ? 16'h0 : planemode[1];
 	// STATUS: ready, no daughterboard, sticky bits, live vblank
-	11'h400: reg_dout = 16'h000A | (status & ~16'h0010) | (in_vblank ? 16'h0010 : 16'h0);
+	// bit 0: window mover busy (HP-UX 9's ITE spins on it, byte at $564801,
+	// before every glyph); bit 4: vertical blank
+	11'h400: reg_dout = 16'h000A | (status & ~16'h0011) | (in_vblank ? 16'h0010 : 16'h0) | {15'd0, wm_busy};
 	default: reg_dout = 16'h0000;
 	endcase
 end

@@ -339,6 +339,12 @@ always @(*) begin
 		d_region = R_VRAM;
 	else if (s_la[31:4] == 28'h005F400)
 		d_region = R_SYS;
+	else if (s_la[31:2] == 30'h0010_0001 && s_write)
+		// $400004-$400007: HP-UX 9's clock setup (_YO_setup) writes $FF to
+		// $400007 unprotected.  Writes are taken and ignored; reads, and the
+		// EEPROM controller's registers around it ($400001/3/5, $400011-3F),
+		// still bus-error, since the boot ROM and HP-UX probe those.
+		d_region = R_STUB;
 	else if (s_la[31:4] == 28'h005F800) begin  // MC6840 PTM
 		d_region = R_IO8; d_dev = DEV_PTM;
 	end
@@ -641,6 +647,7 @@ always @(posedge clk)
 // Bus service FSM
 //----------------------------------------------------------------------------
 reg  [31:0] sysreg [0:3];
+wire [31:0] sys_rd = (s_la[3:2] == 2'd3) ? {sysreg[3][31:16], 8'h02, sysreg[3][7:0]} : sysreg[s_la[3:2]];
 
 function [31:0] merge_be;
 	input [31:0] old;
@@ -717,9 +724,12 @@ always @(posedge clk) begin
 			svc         <= S_MEM;
 		end
 		R_SYS: begin
-			if (s_write) sysreg[s_la[3:2]] <= merge_be(sysreg[s_la[3:2]], s_wdata, s_be);
-			complete(s_src, sysreg[s_la[3:2]]);
-			event_log(EV_SYS, s_write ? s_wdata : sysreg[s_la[3:2]]);
+			// $5F400E is the read-only MMU/model ID: 2 = Model 385 (HP-UX 9
+			// and NetBSD read it); the rest is read/write, as in MAME
+			if (s_write) sysreg[s_la[3:2]] <= merge_be(sysreg[s_la[3:2]], s_wdata,
+			                                           (s_la[3:2] == 2'd3) ? (s_be & 4'b1101) : s_be);
+			complete(s_src, sys_rd);
+			event_log(EV_SYS, s_write ? s_wdata : sys_rd);
 		end
 		R_IO8: begin
 			svc_dev   <= d_dev;
