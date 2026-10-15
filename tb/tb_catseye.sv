@@ -92,6 +92,23 @@ function [7:0] rule1;   // reference per-bit rule
 	for (n = 0; n < 8; n = n + 1) rule1[n] = en[n] ? r[3 - {s[n], d[n]}] : d[n];
 endfunction
 
+// bit-mode reference: the group of 16 pixels at a, bit 15-n -> pixel n,
+// masked pixels only; planes 0,2 copy, 1 inverts, 3-6 xor, 7 disabled
+reg [15:0] bexp;
+task bit_ref(input integer a, input [15:0] dbits, input [15:0] mask);
+	integer n;
+	reg [7:0] s;
+	begin
+		for (n = 0; n < 16; n = n + 1) if (mask[15 - n]) begin
+			s = {8{dbits[15 - n]}};
+			ref_[a + n] = (ref_[a + n] & 8'h80)            // plane 7: not enabled
+			            | ((ref_[a + n] ^ s) & 8'h78)       // planes 3-6: xor
+			            | (s & 8'h05)                       // planes 0, 2: source
+			            | (~s & 8'h02);                     // plane 1: not source
+		end
+	end
+endtask
+
 integer x, y, sxx, syy, dxx, dyy, w, h, i;
 reg [7:0] snap [0:2047];
 reg [31:0] rd;
@@ -199,6 +216,46 @@ initial begin
 	move(0, 0, 6, 21, 37, 13);
 	compare("pattern fill", 0, 0, 96, 64);
 	wreg(11'h289, 16'h0000);
+
+	// ---- bit mode (ACNTL $100): 16 pixels a word, bit 15 leftmost ----
+	set_rule(8'hFF, 4'd3, 4'd3);
+	for (y = 100; y < 104; y = y + 1) for (x = 0; x < 64; x = x + 4)
+		hostw(y * 2048 + x, {8'(x*13+y), 8'((x+1)*13+y) & 8'hF0, 8'(x*3^y), 8'(y*5+x) & 8'h0F}, 4'hF);
+	for (y = 100; y < 104; y = y + 1) for (x = 0; x < 64; x = x + 4) begin
+		ref_[y*2048+x] = x*13+y; ref_[y*2048+x+1] = 8'((x+1)*13+y) & 8'hF0;
+		ref_[y*2048+x+2] = (x*3)^y; ref_[y*2048+x+3] = 8'(y*5+x) & 8'h0F;
+	end
+	// planes 0,2 copy the bit, plane 1 inverts it, 3-6 xor it, plane 7 is off
+	wreg(11'h280, 16'h7F00);
+	set_rule(8'h05, 4'd3, 4'd3);
+	set_rule(8'h02, 4'd12, 4'd3);
+	set_rule(8'h78, 4'd6, 4'd3);
+	set_rule(8'h80, 4'd15, 4'd3);
+	wreg(11'h284, 16'hFF00);
+	wreg(11'h28A, 16'h0100);                  // ACNTL: bit mode
+	// even word, all 16 pixels; the address bits below the group are ignored
+	hostw(100 * 2048 + 16 + 4, {16'hA5C3, 16'h0000}, 4'b1100);
+	bit_ref(100 * 2048 + 16, 16'hA5C3, 16'hFFFF);
+	// odd word, high byte only: pixels 0-7
+	hostw(101 * 2048 + 32 + 10, {16'h0000, 16'h3C96}, 4'b0010);
+	bit_ref(101 * 2048 + 32, 16'h3C96, 16'hFF00);
+	// longword: the high word, then the low word, on the same group
+	hostw(102 * 2048 + 48, 32'h1234F00F, 4'hF);
+	bit_ref(102 * 2048 + 48, 16'h1234, 16'hFFFF);
+	bit_ref(102 * 2048 + 48, 16'hF00F, 16'hFFFF);
+	compare("bit-mode writes", 0, 96, 64, 8);
+	// reads: any plane set, then plane 3 through PLANEMODE
+	hostr(103 * 2048 + 16 + 6, rd);
+	for (i = 0; i < 16; i = i + 1) bexp[15 - i] = |ref_[103*2048+16+i];
+	if (rd !== {bexp, bexp}) begin $display("FAIL bit-mode read %h expected %h", rd, {bexp, bexp}); errors = errors + 1; end
+	wreg(11'h28B, 16'h0300);                  // PLANEMODE: plane 3
+	hostr(103 * 2048 + 32, rd);
+	for (i = 0; i < 16; i = i + 1) bexp[15 - i] = ref_[103*2048+32+i][3];
+	if (rd !== {bexp, bexp}) begin $display("FAIL bit-mode plane read %h expected %h", rd, {bexp, bexp}); errors = errors + 1; end
+	wreg(11'h28B, 16'h0000);
+	wreg(11'h28A, 16'h0000);
+	wreg(11'h280, 16'hFF00);
+	set_rule(8'hFF, 4'd3, 4'd3);
 
 	if (unsupported) begin $display("FAIL unsupported flagged"); errors = errors + 1; end
 	if (errors == 0) $display("ALL TESTS PASSED"); else $display("TEST FAILED (%0d)", errors);

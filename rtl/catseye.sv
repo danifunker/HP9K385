@@ -17,11 +17,20 @@
 //  Bank 0 = video, bank 1 = overlay.  It lives outside this module, behind
 //  the vr_* port (longword address {bank, y[9:0], x[10:2]}).
 //
-//  Implemented: host pixel writes through PRR (word mode), window move with
-//  WRR, clipping, source plane select, the TRR=$F0 pattern fill, STATUS,
-//  VBLANK and window-move interrupts.
-//  Not yet: RUG line drawing, bit mode (ACNTL $100), blink.  They set
-//  `unsupported` so the sim can flag them.
+//  Implemented: host pixel writes through PRR in byte mode and bit mode
+//  (ACNTL $100), window move with WRR, clipping, source plane select, the
+//  TRR=$F0 pattern fill, STATUS, VBLANK and window-move interrupts.
+//  Not yet: RUG line drawing, blink.  They set `unsupported` so the sim can
+//  flag them.
+//
+//  Bit mode (MAME vram_r_bit / vram_w_bit): a 16-bit host access addresses
+//  the aligned group of 16 pixels around its byte address (address bits 3:0
+//  ignored), data bit 15 = the leftmost pixel.  A write gives every enabled
+//  plane its data bit through that plane's PRR rule; a byte write touches its
+//  8 pixels only, and a longword write applies the high word, then the low
+//  one, to the same group.  A read returns, per pixel, "any plane set", or
+//  the plane PLANEMODE selects.  Here it is a read-modify-write of the group's
+//  four VRAM longwords.
 //
 //  Ports:
 //    reg_*  16-bit register access, word index (byte offset >> 1) within
@@ -370,6 +379,9 @@ localparam E_END    = 3'd7;   // mover: final write-back, next bank
 reg   [2:0] es;
 reg         h_bank;           // host write: bank being written
 reg  [31:0] h_old;
+reg         h_bit;            // host access in bit mode
+reg   [1:0] h_k;              // bit mode: longword of the 16-pixel group
+reg  [15:0] h_bits;           // bit mode: read result being gathered
 reg         cpu_wrote;
 
 // mover state
@@ -491,6 +503,51 @@ task automatic flush_dst;
 	end
 endtask
 
+// ---- bit mode ----
+// the 16-bit data words of the access and their per-pixel masks
+// (lanes: [31:16] is the even word, byte lane 3 = its high byte)
+wire [15:0] bw_hi   = cpu_wdata[31:16];
+wire [15:0] bw_lo   = cpu_wdata[15:0];
+wire [15:0] bm_hi   = {{8{cpu_be[3]}}, {8{cpu_be[2]}}};
+wire [15:0] bm_lo   = {{8{cpu_be[1]}}, {8{cpu_be[0]}}};
+wire [21:2] h_la    = h_bit ? {h_bank, cpu_addr[20:4], h_k} : {h_bank, cpu_addr};
+
+// pixel byte after a bit-mode write: hi/lo = this pixel's data bit in the
+// high and low word, mhi/mlo = whether that word's byte enable covers it
+function [7:0] bit_pixel;
+	input  [7:0] old;
+	input        hi, mhi, lo, mlo;
+	input  [7:0] en;
+	input [31:0] rules;
+	reg    [7:0] t;
+	begin
+		t = old;
+		if (mhi) t = apply_rules({8{hi}}, t, en, rules);
+		if (mlo) t = apply_rules({8{lo}}, t, en, rules);
+		bit_pixel = t;
+	end
+endfunction
+
+// pixel as a bit-mode read sees it
+function bit_read;
+	input  [7:0] px;
+	input [15:0] pm;          // PLANEMODE of the bank read
+	bit_read = (pm == 16'd0) ? |px : px[pm[10:8]];
+endfunction
+
+// the four pixels of longword k of the group
+wire  [3:0] bn0 = 4'd15 - {h_k, 2'd0};
+wire  [3:0] bn1 = bn0 - 4'd1, bn2 = bn0 - 4'd2, bn3 = bn0 - 4'd3;
+wire  [7:0] h_en    = fben[h_bank];
+wire [31:0] h_rules = host_rules(h_bank);
+wire [15:0] h_pm    = planemode[h_bank];
+wire [31:0] bit_wdata = {bit_pixel(h_old[31:24], bw_hi[bn0], bm_hi[bn0], bw_lo[bn0], bm_lo[bn0], h_en, h_rules),
+                         bit_pixel(h_old[23:16], bw_hi[bn1], bm_hi[bn1], bw_lo[bn1], bm_lo[bn1], h_en, h_rules),
+                         bit_pixel(h_old[15:8],  bw_hi[bn2], bm_hi[bn2], bw_lo[bn2], bm_lo[bn2], h_en, h_rules),
+                         bit_pixel(h_old[7:0],   bw_hi[bn3], bm_hi[bn3], bw_lo[bn3], bm_lo[bn3], h_en, h_rules)};
+wire  [3:0] bit_rd = {bit_read(vr_rdata[31:24], h_pm), bit_read(vr_rdata[23:16], h_pm),
+                      bit_read(vr_rdata[15:8],  h_pm), bit_read(vr_rdata[7:0],   h_pm)};
+
 always @(posedge clk) begin
 	cpu_ack   <= 0;
 	cpu_wrote <= 0;
@@ -517,10 +574,12 @@ always @(posedge clk) begin
 				wm_done <= 1;
 		end
 		else if (cpu_req && !cpu_ack) begin
-			if (acntl[8]) unsupported <= 1;   // bit mode
+			h_bit <= acntl[8];
+			h_k   <= 2'd0;
 			if (!cpu_we) begin
+				h_bank  <= acntl[9];
 				vr_req  <= 1; vr_we <= 0; vr_be <= 4'hF;
-				vr_addr <= {acntl[9], cpu_addr};
+				vr_addr <= acntl[8] ? {acntl[9], cpu_addr[20:4], 2'd0} : {acntl[9], cpu_addr};
 				es      <= E_HREAD;
 			end
 			else if (fben[0] == 0 && fben[1] == 0) begin
@@ -529,14 +588,33 @@ always @(posedge clk) begin
 			else begin
 				h_bank  <= (fben[0] == 0);
 				vr_req  <= 1; vr_we <= 0; vr_be <= 4'hF;
-				vr_addr <= {fben[0] == 0, cpu_addr};
+				vr_addr <= acntl[8] ? {fben[0] == 0, cpu_addr[20:4], 2'd0} : {fben[0] == 0, cpu_addr};
 				es      <= E_HREAD;
 			end
 		end
 	end
 	E_HREAD: if (vr_ack) begin
 		vr_req <= 0;
-		if (!cpu_we) begin
+		if (!cpu_we && h_bit) begin
+			// gather 4 pixels; lane 3 = the leftmost = bit 15 - 4k
+			case (h_k)
+			2'd0: h_bits[15:12] <= bit_rd;
+			2'd1: h_bits[11:8]  <= bit_rd;
+			2'd2: h_bits[7:4]   <= bit_rd;
+			default: ;
+			endcase
+			if (h_k == 2'd3) begin
+				cpu_rdata <= {h_bits[15:4], bit_rd, h_bits[15:4], bit_rd};
+				cpu_ack   <= 1;
+				es        <= E_IDLE;
+			end
+			else begin
+				h_k     <= h_k + 2'd1;
+				vr_req  <= 1; vr_we <= 0; vr_be <= 4'hF;
+				vr_addr <= {h_bank, cpu_addr[20:4], h_k + 2'd1};
+			end
+		end
+		else if (!cpu_we) begin
 			cpu_rdata <= vr_rdata;
 			cpu_ack   <= 1;
 			es        <= E_IDLE;
@@ -548,21 +626,36 @@ always @(posedge clk) begin
 	end
 	E_HWRITE: begin
 		if (!vr_req) begin
-			vr_req   <= 1; vr_we <= 1; vr_be <= cpu_be;
-			vr_addr  <= {h_bank, cpu_addr};
-			vr_wdata <= {apply_rules(cpu_wdata[31:24], h_old[31:24], fben[h_bank], host_rules(h_bank)),
-			             apply_rules(cpu_wdata[23:16], h_old[23:16], fben[h_bank], host_rules(h_bank)),
-			             apply_rules(cpu_wdata[15:8],  h_old[15:8],  fben[h_bank], host_rules(h_bank)),
-			             apply_rules(cpu_wdata[7:0],   h_old[7:0],   fben[h_bank], host_rules(h_bank))};
+			vr_req   <= 1; vr_we <= 1;
+			vr_addr  <= h_la;
+			if (h_bit) begin
+				vr_be    <= 4'hF;
+				vr_wdata <= bit_wdata;
+			end
+			else begin
+				vr_be    <= cpu_be;
+				vr_wdata <= {apply_rules(cpu_wdata[31:24], h_old[31:24], fben[h_bank], host_rules(h_bank)),
+				             apply_rules(cpu_wdata[23:16], h_old[23:16], fben[h_bank], host_rules(h_bank)),
+				             apply_rules(cpu_wdata[15:8],  h_old[15:8],  fben[h_bank], host_rules(h_bank)),
+				             apply_rules(cpu_wdata[7:0],   h_old[7:0],   fben[h_bank], host_rules(h_bank))};
+			end
 		end
 		else if (vr_ack) begin
 			vr_req    <= 0;
 			cpu_wrote <= 1;
-			if (!h_bank && fben[1] != 0) begin
+			if (h_bit && h_k != 2'd3) begin
+				// bit mode: the next longword of the group
+				h_k     <= h_k + 2'd1;
+				vr_req  <= 1; vr_we <= 0; vr_be <= 4'hF;
+				vr_addr <= {h_bank, cpu_addr[20:4], h_k + 2'd1};
+				es      <= E_HREAD;
+			end
+			else if (!h_bank && fben[1] != 0) begin
 				// the overlay bank takes the write too
 				h_bank  <= 1;
+				h_k     <= 2'd0;
 				vr_req  <= 1; vr_we <= 0; vr_be <= 4'hF;
-				vr_addr <= {1'b1, cpu_addr};
+				vr_addr <= h_bit ? {1'b1, cpu_addr[20:4], 2'd0} : {1'b1, cpu_addr};
 				es      <= E_HREAD;
 			end
 			else begin
