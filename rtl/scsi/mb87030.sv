@@ -295,15 +295,12 @@ always @(*) begin
 	bf_cond = (state == S_IDLE) && pctl[7] && (cv == 9'd0);
 	bf_q_n  = bf_cond;
 
-	// Reset & disable holds the chip in reset: RST is released and no
-	// command or interrupt is kept.  HP-UX 9 ends its bus reset this way
+	// Reset & disable releases RST.  HP-UX 9 ends its bus reset this way
 	// (SCMD = RST, SCTL = C0, SCMD = 0); MAME leaves RST on the bus until the
-	// next SCMD write with SCTL[7] clear.
-	if (sctl[7]) begin
-		set_ctrl(9'd0, L_RST);
-		scmd_n = 8'h00;
-		ints_n = 8'h00;
-	end
+	// next SCMD write with SCTL[7] clear.  The registers keep their values:
+	// the boot ROM's register test writes SCMD with SCTL[7] set and reads it
+	// back.
+	if (sctl[7]) set_ctrl(9'd0, L_RST);
 
 	// ---- state machine (MAME step()) ----
 	if (sctl[7] && state != S_IDLE) begin

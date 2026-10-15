@@ -483,8 +483,13 @@ initial begin
 	wr(SCTL, 8'hC0);
 	repeat (2) @(negedge clk);
 	chk(!card.bus_c[8], "RST still on the bus after SCTL = C0");
-	rd(SCMD, v); chk(v == 8'h00, $sformatf("SCMD %02x with SCTL[7] set, want 00", v));
-	rd(INTS, v); chk(v == 8'h00, $sformatf("INTS %02x with SCTL[7] set, want 00", v));
+	// registers keep what is written while SCTL[7] is set (the boot ROM's
+	// register test writes and reads them back in that state), and an RST
+	// command then does not reach the bus
+	wr(SCMD, 8'h10);
+	rd(SCMD, v); chk(v == 8'h10, $sformatf("SCMD %02x with SCTL[7] set, want 10 (written)", v));
+	delay_us(5);
+	chk(!card.bus_c[8], "RST on the bus after SCMD = 10 with SCTL[7] set");
 	wr(SCMD, 8'h00);
 	delay_us(5);
 	chk(!card.bus_c[8], "RST on the bus after SCMD = 0 with SCTL[7] set");
