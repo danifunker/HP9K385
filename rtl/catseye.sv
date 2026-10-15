@@ -88,7 +88,10 @@ reg [15:0] misc, rugsc, wmx, linepath, linetype;
 reg [15:0] wm_w, wm_h, wm_sx, wm_sy, wm_dx, wm_dy;
 reg [15:0] clip_l, clip_r, clip_t, clip_b;
 reg [15:0] status;
-reg [15:0] pattern [0:1][0:127];
+// Pattern RAM: per plane p, 32 words {bank, row}; host word $200/$300 + 16p + row.
+// Eight small RAMs read asynchronously (MLABs), see the generate block below.
+wire [15:0] pat_host_q;                       // host read data
+wire        pat_host = (reg_word[10:7] == 4'b0100) || (reg_word[10:7] == 4'b0110);
 
 function [15:0] combine;
 	input [15:0] old, nw;
@@ -118,8 +121,7 @@ assign busy = wm_busy;
 
 always @(*) begin
 	reg_dout = 16'h0000;
-	if (reg_word >= 11'h200 && reg_word < 11'h280) reg_dout = pattern[0][reg_word[6:0]];
-	else if (reg_word >= 11'h300 && reg_word < 11'h380) reg_dout = pattern[1][reg_word[6:0]];
+	if (pat_host) reg_dout = pat_host_q;
 	else case (reg_word)
 	11'h020: reg_dout = in_vblank ? 16'hFF00 : 16'h0000;
 	11'h022: reg_dout = wm_busy ? {fben[0], 8'h00} : 16'h0000;
@@ -280,12 +282,7 @@ always @(posedge clk) begin
 		if (cpu_wrote) status <= status | 16'h0004;
 
 		if (reg_cs && reg_we) begin
-			if (reg_word >= 11'h200 && reg_word < 11'h280) begin
-				if (|tcwen[0]) pattern[0][reg_word[6:0]] <= combine(pattern[0][reg_word[6:0]], d, reg_be);
-			end
-			else if (reg_word >= 11'h300 && reg_word < 11'h380) begin
-				if (|tcwen[1]) pattern[1][reg_word[6:0]] <= combine(pattern[1][reg_word[6:0]], d, reg_be);
-			end
+			if (pat_host) ;                     // pattern RAM: written below
 			else case (reg_word)
 			11'h024: vbl_pend <= 0;
 			11'h026: wm_pend <= 0;
@@ -426,11 +423,27 @@ function [7:0] src_view;
 endfunction
 
 // pattern bytes for the four pixels of the destination longword
-wire [31:0] pat_word;
+// One RAM per plane.  The mover reads row dy of all eight at once; the host
+// uses the read port when the mover is idle (a host read of a pattern
+// register during a window move returns the mover's row; host writes are
+// whole words in practice, a partial one merges with what the port reads).
+wire [15:0] pat_q [0:7];
+wire        pat_we   = reg_cs && reg_we && pat_host && |tcwen[reg_word[8]];
+wire  [4:0] pat_ha   = {reg_word[8], reg_word[3:0]};
 genvar gl, gp;
+generate for (gp = 0; gp < 8; gp = gp + 1) begin : g_patram
+	(* ramstyle = "MLAB, no_rw_check" *) reg [15:0] pat [0:31];
+	wire [4:0] ra = wm_busy ? {m_bank, dy[3:0]} : pat_ha;
+	assign pat_q[gp] = pat[ra];
+	always @(posedge clk)
+		if (pat_we && reg_word[6:4] == gp) pat[pat_ha] <= combine(pat_q[gp], reg_din, reg_be);
+end endgenerate
+assign pat_host_q = pat_q[reg_word[6:4]];
+
+wire [31:0] pat_word;
 generate for (gl = 0; gl < 4; gl = gl + 1) begin : g_lane
 	for (gp = 0; gp < 8; gp = gp + 1) begin : g_plane
-		assign pat_word[gl*8 + gp] = pattern[m_bank][{gp[2:0], dy[3:0]}][{dx[3:2], 2'd3 - gl[1:0]}];
+		assign pat_word[gl*8 + gp] = pat_q[gp][{dx[3:2], 2'd3 - gl[1:0]}];
 	end
 end endgenerate
 

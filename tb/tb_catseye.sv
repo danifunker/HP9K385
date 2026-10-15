@@ -72,6 +72,13 @@ task hostr(input [20:0] a, output [31:0] d);
 	begin @(negedge clk); cpu_req = 1; cpu_we = 0; cpu_addr = a[20:2];
 	      @(posedge clk); while (!cpu_ack) @(posedge clk); #1 d = cpu_rdata; @(negedge clk); cpu_req = 0; end
 endtask
+task rreg_chk(input [10:0] w, input [15:0] exp);
+	begin
+		@(negedge clk); reg_cs = 1; reg_we = 0; reg_word = w; #1;
+		if (reg_dout !== exp) begin $display("FAIL pattern read %h: %h expected %h", w, reg_dout, exp); errors = errors + 1; end
+		@(negedge clk); reg_cs = 0;
+	end
+endtask
 task wait_idle; begin @(posedge clk); @(posedge clk); while (busy) @(posedge clk); end endtask
 
 // rules per plane: bank 0 PRR/WRR; tcwen picks the planes
@@ -178,6 +185,20 @@ initial begin
 	hostw(60 * 2048 + 16, 32'hFFFF_FFFF, 4'hF);
 	for (x = 16; x < 20; x = x + 1) ref_[60*2048+x] = ref_[60*2048+x] ^ 8'h03;
 	compare("per-plane host rules", 0, 0, 96, 64);
+
+	// pattern fill (TRRCTL bit 8, TRR $F0): each plane draws its own 16x16 pattern
+	wreg(11'h280, 16'hFF00);
+	wreg(11'h284, 16'hFF00);                  // all planes write-enabled
+	for (i = 0; i < 128; i = i + 1) wreg(11'h200 + i, 16'(i * 16'h9E37 ^ 16'h5A5A));
+	rreg_chk(11'h200 + 37, 16'(37 * 16'h9E37 ^ 16'h5A5A));
+	wreg(11'h289, 16'h0100);                  // TRRCTL1: pattern
+	wreg(11'h286, 16'hF000);                  // TRR1 = $F0
+	for (y = 21; y < 21 + 13; y = y + 1) for (x = 6; x < 6 + 37; x = x + 1)
+		for (i = 0; i < 8; i = i + 1)
+			ref_[y*2048+x][i] = ((i * 16 + (y & 15)) * 16'h9E37 ^ 16'h5A5A) >> (x & 15);
+	move(0, 0, 6, 21, 37, 13);
+	compare("pattern fill", 0, 0, 96, 64);
+	wreg(11'h289, 16'h0000);
 
 	if (unsupported) begin $display("FAIL unsupported flagged"); errors = errors + 1; end
 	if (errors == 0) $display("ALL TESTS PASSED"); else $display("TEST FAILED (%0d)", errors);
