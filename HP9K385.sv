@@ -64,9 +64,11 @@ assign VIDEO_ARY = (!ar) ? 12'd4 : 12'd0;
 localparam CONF_STR = {
 	"HP9K385;;",
 	"-;",
-	"S0,IMGHDVRAW,SCSI 0;",
-	"S1,IMGHDVRAW,SCSI 1;",
-	"S2,ISOCUECHD,CD-ROM (SCSI 2);",
+	// "SC": Main_MiSTer remembers the image (config/HP9K385.s<n>) and
+	// mounts it again at every core start
+	"SC0,IMGHDVRAW,SCSI 0;",
+	"SC1,IMGHDVRAW,SCSI 1;",
+	"SC2,ISOCUECHD,CD-ROM (SCSI 2);",
 	"-;",
 	"O[3:2],RAM,8 MB,16 MB,32 MB;",
 	"O[122:121],Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
