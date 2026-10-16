@@ -72,6 +72,11 @@ localparam CONF_STR = {
 	"-;",
 	"O[4:2],RAM,8 MB,16 MB,32 MB,64 MB,128 MB (128 MB SDRAM);",
 	"O[5],Fast boot (no RAM test),No,Yes;",
+	"-;",
+	// LAN: the 98643A at select code 21; Main's hp9k_enet bridge carries its
+	// frames (status 14:12 as on the HP 9000/715 core: 0 eth0, 1 Off, ...)
+	"O[15],LAN card (98643A),Present,Absent;",
+	"O[14:12],Network,eth0,Off,eth1,macvlan,tap0;",
 	"O[122:121],Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
 	"-;",
 	"T[0],Reset;",
@@ -259,6 +264,15 @@ always @(posedge clk_sys) mouse_t <= ps2_mouse[24];
 wire  [7:0] so_video, so_overlay;
 wire [23:0] so_rgb;
 
+// LAN card <-> wire (see LAN (98643A) WIRE below)
+wire        lan_tx_ready, lan_tx_we, lan_tx_send, lan_rx_avail, lan_rx_done, lan_padr_stb;
+wire [10:0] lan_tx_addr, lan_tx_len, lan_rx_len, lan_rx_addr;
+wire  [7:0] lan_tx_wdata, lan_rx_q;
+wire [47:0] lan_padr;
+wire        nb_req, nb_we, nb_ack;
+wire [12:0] nb_addr;
+wire [63:0] nb_wdata, nb_rdata;
+
 hp385_top machine
 (
 	.clk(clk_sys),
@@ -323,6 +337,21 @@ hp385_top machine
 	.pix_video(so_video),
 	.pix_overlay(so_overlay),
 	.pix_rgb(so_rgb),
+
+	.lan_present(!status[15]),
+	.lan_tx_ready(lan_tx_ready),
+	.lan_tx_we(lan_tx_we),
+	.lan_tx_addr(lan_tx_addr),
+	.lan_tx_wdata(lan_tx_wdata),
+	.lan_tx_send(lan_tx_send),
+	.lan_tx_len(lan_tx_len),
+	.lan_rx_avail(lan_rx_avail),
+	.lan_rx_len(lan_rx_len),
+	.lan_rx_addr(lan_rx_addr),
+	.lan_rx_q(lan_rx_q),
+	.lan_rx_done(lan_rx_done),
+	.lan_padr(lan_padr),
+	.lan_padr_stb(lan_padr_stb),
 
 	.ev_stb(), .ev_kind(), .ev_addr(), .ev_be(), .ev_write(), .ev_data(), .ev_fc(), .ev_walker(),
 	.cpu_halted(),
@@ -423,6 +452,38 @@ sdram_beat32 sdram
 	.SDRAM_CLK(SDRAM_CLK)
 );
 
+///////////////////////   LAN (98643A) WIRE   ///////////////////
+
+// Frames to and from Main_MiSTer's hp9k_enet bridge through a DDR3 mailbox
+// at ARM physical 0x1FF00000 (rtl/lan_wire.sv); the LANCE itself is in the
+// core (rtl/lance.sv, rtl/hp98643.sv).
+
+lan_wire #(.CLK_HZ(33_000_000)) lan_wire
+(
+	.clk(clk_sys),
+	.reset(reset),
+	.ena(status[14:12] != 3'd1),
+	.mac(lan_padr),
+	.mac_stb(lan_padr_stb),
+	.tx_ready(lan_tx_ready),
+	.tx_we(lan_tx_we),
+	.tx_addr(lan_tx_addr),
+	.tx_wdata(lan_tx_wdata),
+	.tx_send(lan_tx_send),
+	.tx_len(lan_tx_len),
+	.rx_avail(lan_rx_avail),
+	.rx_len(lan_rx_len),
+	.rx_addr(lan_rx_addr),
+	.rx_q(lan_rx_q),
+	.rx_done(lan_rx_done),
+	.nb_req(nb_req),
+	.nb_we(nb_we),
+	.nb_addr(nb_addr),
+	.nb_wdata(nb_wdata),
+	.nb_ack(nb_ack),
+	.nb_rdata(nb_rdata)
+);
+
 ///////////////////////   VRAM (DDR3) AND VIDEO   ////////////////
 
 assign DDRAM_CLK = clk_sys;
@@ -443,6 +504,12 @@ vram_ddr3 #(.BASE(29'h0600_0000)) vram
 	.f_ack(f_ack),
 	.f_valid(f_valid),
 	.f_data(f_data),
+	.nb_req(nb_req),
+	.nb_we(nb_we),
+	.nb_addr(nb_addr),
+	.nb_wdata(nb_wdata),
+	.nb_ack(nb_ack),
+	.nb_rdata(nb_rdata),
 	.DDRAM_BUSY(DDRAM_BUSY),
 	.DDRAM_BURSTCNT(DDRAM_BURSTCNT),
 	.DDRAM_ADDR(DDRAM_ADDR),

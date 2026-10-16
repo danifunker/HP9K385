@@ -18,6 +18,8 @@
 //    $00500000-$0050020F  98620C DMA (hp98620.sv), interrupt level programmable
 //    $00690000-$0069003F  98644 serial, select code 9 (hp98644.sv), IRQ 5
 //    $006E0000-$006E07FF  98265A SCSI, select code 14 (hp98265a.sv), IRQ 4
+//    $00750000-$0075FFFF  98643A LAN, select code 21 (hp98643.sv), IRQ 5;
+//                         absent (bus error) when lan_present is 0
 //    $005F4000-$005F400F  system-control registers (16 bytes of RAM, as MAME)
 //    $005F8000-$005F800F  MC6840 PTM (ptm6840.sv), IRQ 6
 //    top N MB below $FFFFFFFF  main RAM (mem port, sel 1), N from ram_mask
@@ -119,6 +121,22 @@ module hp385_top
 	input       [7:0] pix_video,          // scanout: video and overlay bytes of a pixel
 	input       [7:0] pix_overlay,
 	output     [23:0] pix_rgb,
+
+	// 98643A LAN: the wire (rtl/lan_wire.sv, in the shell)
+	input             lan_present,
+	input             lan_tx_ready,
+	output            lan_tx_we,
+	output     [10:0] lan_tx_addr,
+	output      [7:0] lan_tx_wdata,
+	output            lan_tx_send,
+	output     [10:0] lan_tx_len,
+	input             lan_rx_avail,
+	input      [10:0] lan_rx_len,
+	output     [10:0] lan_rx_addr,
+	input       [7:0] lan_rx_q,
+	output            lan_rx_done,
+	output     [47:0] lan_padr,
+	output            lan_padr_stb,
 
 	// trace port
 	output reg        ev_stb,
@@ -322,6 +340,7 @@ localparam DEV_HPIB    = 4'd5;   // io8: built-in HP-IB card + TMS9914
 localparam DEV_DMA     = 4'd6;   // io16: 98620C DMA
 localparam DEV_SCSI    = 4'd7;   // io16: 98265A SCSI card (SPC on the low bytes)
 localparam DEV_SERIAL  = 4'd8;   // io16: 98644 serial card (8250 on the low bytes)
+localparam DEV_LAN     = 4'd9;   // io16: 98643A LAN card
 
 
 reg  [2:0]  d_region;
@@ -364,6 +383,9 @@ always @(*) begin
 	end
 	else if (s_la[31:16] == 16'h006E && s_la[15:11] == 5'd0) begin   // 98265A, sc 14
 		d_region = R_IO16; d_dev = DEV_SCSI;
+	end
+	else if (s_la[31:16] == 16'h0075 && lan_present) begin             // 98643A, sc 21
+		d_region = R_IO16; d_dev = DEV_LAN;
 	end
 	else if (s_la[31:16] == 16'h0042) begin    // 8042 (mirrored)
 		d_region = R_IO8; d_dev = DEV_HIL;
@@ -492,18 +514,50 @@ wire  [7:0] io8_rdata = (svc_dev == DEV_CARD) ? card_dout :
 // A register write to the 98550 waits while its window mover is busy, so
 // software that does not poll (HP-UX's ITE) cannot change a move in flight.
 wire        cats_busy;
-wire        io16_wait  = (svc_dev == DEV_CATSEYE) && svc_write && cats_busy;
+wire        lan_wait;
+wire        io16_wait  = ((svc_dev == DEV_CATSEYE) && svc_write && cats_busy) ||
+                         ((svc_dev == DEV_LAN) && lan_wait);
 wire        io16_cs    = (svc == S_IO16) && (|io_pend) && !io16_wait;
 wire [31:0] io16_addr  = {svc_addr, io_pend[1] ? 2'd0 : 2'd2};
 wire  [1:0] io16_be    = io_pend[1] ? svc_be[3:2] : svc_be[1:0];
 wire [15:0] io16_wdata = io_pend[1] ? svc_wdata[31:16] : svc_wdata[15:0];
 wire [15:0] cats_dout, ner_dout;
 wire [15:0] dma_dout;
-wire [15:0] scsi_dout, ser_dout;
+wire [15:0] scsi_dout, ser_dout, lan_dout;
 wire [15:0] io16_rdata = (svc_dev == DEV_NEREID) ? ner_dout :
+                         (svc_dev == DEV_LAN)    ? lan_dout :
                          (svc_dev == DEV_DMA)    ? dma_dout :
                          (svc_dev == DEV_SCSI)   ? scsi_dout :
                          (svc_dev == DEV_SERIAL) ? ser_dout : cats_dout;
+
+// 98643A LAN (select code 21).  Card RAM reads take a clock (lan_wait).
+wire        lan_irq;
+hp98643 lan (
+	.clk(clk),
+	.reset(dio_reset),
+	.reg_sel((svc == S_IO16) && (|io_pend) && svc_dev == DEV_LAN),
+	.reg_cs(io16_cs && svc_dev == DEV_LAN),
+	.reg_we(svc_write),
+	.reg_off(io16_addr[15:1]),
+	.reg_be(io16_be),
+	.reg_din(io16_wdata),
+	.reg_dout(lan_dout),
+	.reg_wait(lan_wait),
+	.irq(lan_irq),
+	.tx_ready(lan_tx_ready),
+	.tx_we(lan_tx_we),
+	.tx_addr(lan_tx_addr),
+	.tx_wdata(lan_tx_wdata),
+	.tx_send(lan_tx_send),
+	.tx_len(lan_tx_len),
+	.rx_avail(lan_rx_avail),
+	.rx_len(lan_rx_len),
+	.rx_addr(lan_rx_addr),
+	.rx_q(lan_rx_q),
+	.rx_done(lan_rx_done),
+	.padr(lan_padr),
+	.padr_stb(lan_padr_stb)
+);
 
 // 98644 serial (select code 9)
 wire        ser_irq;
@@ -644,7 +698,7 @@ nereid nereid (
 // Interrupts: all autovectored; IPL is the highest pending level
 //----------------------------------------------------------------------------
 wire        gfx_int = card_intreg[7] && gfx_irq;
-wire  [7:1] irq_lvl = {hil_nmi, ptm_irq, ser_irq, scsi_irq, hpib_irq, 1'b0, hil_irq1} | dma_irq |
+wire  [7:1] irq_lvl = {hil_nmi, ptm_irq, ser_irq | lan_irq, scsi_irq, hpib_irq, 1'b0, hil_irq1} | dma_irq |
                       ((gfx_int ? 7'b0000001 : 7'b0) << (card_intreg[5:3] - 3'd1));
 always @(posedge clk)
 	if (reset) ipl_n <= 3'd7;

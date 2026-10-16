@@ -33,6 +33,8 @@ V_SRC = \
 	$(RTL)/hp98265a.sv \
 	$(RTL)/uart8250.sv \
 	$(RTL)/hp98644.sv \
+	$(RTL)/hp98643.sv \
+	$(RTL)/lance.sv \
 	$(RTL)/scsi/mb87030.sv \
 	$(RTL)/scsi/scsi_target.sv \
 	$(RTL)/wombat/wombat_cpu.sv \

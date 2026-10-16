@@ -24,6 +24,8 @@ scsi_dma|verilator|tb/tb_scsi_dma.sv tb/tb_scsi.sv rtl/hp98265a.sv rtl/hp98620.s
 wombat_bus32|verilator|tb/tb_wombat_bus32.sv rtl/wombat/wombat_bus32.sv
 upi41_diff|verilator|tb/tb_upi41_diff.sv tb/upi41_ref.sv rtl/upi41.sv
 scanout|verilator|tb/tb_scanout.sv rtl/scanout.sv rtl/vram_ddr3.sv
+lance|verilator|tb/tb_lance.sv rtl/hp98643.sv rtl/lance.sv
+lan_wire|verilator|tb/tb_lan_wire.sv rtl/lan_wire.sv
 "
 
 fail=0

@@ -17,6 +17,8 @@
 //   --cd FILE          CD-ROM image on ID 2: flat 2048-byte sectors (an .iso), read-only
 //   --key CYC:CODE     at clock CYC send HIL keycode CODE (hex; bit 0 = release); repeatable
 //   --reset CYC        at clock CYC a 64-clock system reset (the OSD's Reset); repeatable
+//   --no-lan           no 98643A LAN card at select code 21 (default: present;
+//                      transmitted frames are logged as [LAN] and dropped)
 //   --mem-model M      main memory timing: ideal (default, MEM_LATENCY clocks a beat)
 //                      or sdram (the measured sdram_beat32 timing, see mem_service)
 //   --vram-latency N   98550 frame-buffer beat latency in clocks (default 2)
@@ -304,6 +306,7 @@ int main(int argc, char **argv) {
 	std::vector<std::pair<uint32_t, uint16_t>> patches;
 	std::vector<std::pair<uint64_t, uint8_t>> keys;
 	std::vector<uint64_t> resets;
+	bool lan = true;
 
 	for (int i = 1; i < argc; i++) {
 		std::string a = argv[i];
@@ -339,6 +342,7 @@ int main(int argc, char **argv) {
 		else if (a == "--snap") snap_path = next();
 		else if (a == "--snap-every") snap_every = strtoull(next(), nullptr, 0);
 		else if (a == "--reset") resets.push_back(strtoull(next(), nullptr, 0));
+		else if (a == "--no-lan") lan = false;
 		else if (a == "--key") {
 			const char *v = next();
 			const char *c = strchr(v, ':');
@@ -403,6 +407,9 @@ int main(int argc, char **argv) {
 		top->rtc_set[2] = 0;
 	}
 	top->ce = 1;
+	top->lan_present = lan;
+	top->lan_tx_ready = 1;
+	top->lan_rx_avail = 0;
 	top->reset = 1;
 	top->clk = 0;
 	top->mem_ack = 0;
@@ -454,6 +461,9 @@ int main(int argc, char **argv) {
 		top->eval();
 		if (fst && cycle >= fst_start && cycle < fst_start + fst_cycles) fst->dump(cycle * 2 + 1);
 		if (top->reset) continue;
+
+		if (top->lan_tx_send)
+			printf("[LAN] tx %u bytes @%llu\n", top->lan_tx_len, (unsigned long long)cycle);
 
 		// a port request that is never answered is a harness/protocol bug
 		static uint64_t vreq_since = 0;

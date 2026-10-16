@@ -48,3 +48,10 @@ The bench was mutation-checked on 2026-10-14. A swapped rule-index order and off
 | Bench | Status | Run |
 |---|---|---|
 | `tb_uart8250.sv` | **passes**. Covers internal loopback (data, IIR, MSR lines), THRE interrupt, 8N1 over a wire with the bit period checked, 7E1, a stick-parity error and overrun. It found a real bug: an LSR read in the same clock as a received error lost the error. | `verilator --binary --timing -Wno-fatal -Wno-WIDTH --top-module tb_uart8250 --Mdir build/obj_tb_uart -o tb tb/tb_uart8250.sv rtl/uart8250.sv && build/obj_tb_uart/tb` (iverilog is too slow for this one) |
+
+## LAN (98643A)
+
+| Bench | Status | Run |
+|---|---|---|
+| `tb_lance.sv` | **passes**. The card (`hp98643` + `lance`) driven by a CPU model through the io16 `reg_sel`/`reg_cs`/`reg_wait` handshake, with a wire model (TX sink with `tx_ready` drops, RX source with a computed FCS). Covers the boot ROM's register test and its six loopback cases exactly (FCS bytes, DTCR, PROM, multicast hash, broadcast, forced collision), the NOVRAM (MAC, checksum, mirrors), NetBSD's attach/init/transmit/receive sequence through the ACK loop, TX/RX chaining with odd buffers, BUFF/UFLO, MISS, overflow, ring wrap at 1/2/8/128, BSWP 0/1, STOP precedence and CSR write rules. 15 mutations were checked; all are caught. It found the chaining bug (descriptor write and next read in one clock). | `scripts/run_benches.sh lance` |
+| `tb_lan_wire.sv` | **passes**. `lan_wire` against a 64 KB mailbox model with random ack latency and a fake Main following `hp9k_enet_poll`: start-up order (MAGIC last, GEN per reset), MAC word, TX/RX echo of 14-1514 byte frames, RX burst and ring-full drop, 10 Mb/s RX pacing, TX-full wait and timeout drop, network Off, reset with a word in flight. 8 mutations were checked; all are caught. | `scripts/run_benches.sh lan_wire` |

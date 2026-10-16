@@ -14,6 +14,9 @@
 #    keyboard and the disk
 #    and boots it again (LED 92) by ~131M clocks.  "HP-HIL Failed" still
 #    boots, but its 2.6 s time-out puts that at ~217M, past the 180M limit.
+# 5. with the 98643A LAN card present: the ROM passes its self-test and
+#    sends its network boot request (the boots above run without the card:
+#    with it, the ROM waits for a boot server before booting the disk).
 # Uses the fast selection time-out sim build (obj_fast).
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -31,7 +34,8 @@ echo "== sim build"
 [ -f "$V/out/bootrom_fast.bin" ] || (cd "$V" && make out/bootrom_fast.bin > /dev/null)
 "$ROOT/tools/cpubench/build.sh" "$OUT/bench.img" > /dev/null
 stop=$(grep "\.done:" "$ROOT/build/cpubench/bench.lst" | awk '{print substr($1,4)}')
-SIM="$V/obj_fast/Vhp385_top --rom $V/out/bootrom_fast.bin --card-rom $ROOT/scratch/roms/dio98550/98550a.bin --hil-rom $ROOT/scratch/roms/human_interface/1820-4784.bin --loop-window 0 --log /dev/null"
+SIM="$V/obj_fast/Vhp385_top --rom $V/out/bootrom_fast.bin --card-rom $ROOT/scratch/roms/dio98550/98550a.bin --hil-rom $ROOT/scratch/roms/human_interface/1820-4784.bin --loop-window 0 --log /dev/null --no-lan"
+LANSIM="${SIM% --no-lan}"
 
 echo "== disk boot (ID 0): cpubench to its end at $stop"
 $SIM --disk0 "$OUT/bench.img" --cycles 160000000 --stop-pc "$stop" --snap "$OUT/disk.ppm" > "$OUT/disk.log" 2>&1
@@ -61,5 +65,10 @@ if grep -a -q "stop: stop-pc" "$OUT/reboot.log" && grep -a -q "leds=92" "$OUT/re
 else
 	echo "FAIL  soft reboot (see $OUT/reboot.log, $OUT/reboot.ppm)"; fail=1
 fi
+
+echo "== LAN card (sc 21): the ROM's self-test passes and it sends its boot request"
+$LANSIM --cycles 47000000 > "$OUT/lan.log" 2>&1
+if grep -a -q "LAN\] tx 60 bytes" "$OUT/lan.log"; then echo "pass  LAN self-test"
+else echo "FAIL  LAN self-test (see $OUT/lan.log)"; fail=1; fi
 
 [ $fail -eq 0 ] && echo "GATE: PASS" || { echo "GATE: FAIL"; exit 1; }

@@ -67,6 +67,7 @@ wire [23:0] rgb;
 vram_ddr3 #(.BASE(BASE)) vram(.clk(clk), .reset(reset),
 	.req(vreq), .we(vwe), .addr(vaddr), .be(vbe), .wdata(vwdata), .ack(vack), .rdata(vrdata),
 	.f_req(f_req), .f_addr(f_addr), .f_ack(f_ack), .f_valid(f_valid), .f_data(f_data),
+	.nb_req(1'b0), .nb_we(1'b0), .nb_addr(13'd0), .nb_wdata(64'd0), .nb_ack(), .nb_rdata(),
 	.DDRAM_BUSY(busy), .DDRAM_BURSTCNT(burstcnt), .DDRAM_ADDR(daddr), .DDRAM_DOUT(dout),
 	.DDRAM_DOUT_READY(dready), .DDRAM_RD(drd), .DDRAM_DIN(ddin), .DDRAM_BE(dbe), .DDRAM_WE(dwe));
 

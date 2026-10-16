@@ -18,6 +18,10 @@
 //  Scanout fetch (f_*, rtl/scanout.sv): burst reads of FBURST beats, served
 //  ahead of the VRAM port whenever the Avalon port is free; the beats come
 //  back registered on f_valid / f_data.  VRAM requests wait meanwhile.
+//
+//  LAN mailbox (nb_*, rtl/lan_wire.sv): single 64-bit words at ARM physical
+//  0x1FF0_0000 + 8 * nb_addr (Main's hp9k_enet bridge), after everything
+//  else.  Writes are posted, reads held until the data returns.
 //============================================================================
 
 module vram_ddr3
@@ -43,6 +47,14 @@ module vram_ddr3
 	output reg        f_valid,
 	output reg [63:0] f_data,
 
+	// LAN mailbox words
+	input             nb_req,
+	input             nb_we,
+	input      [12:0] nb_addr,
+	input      [63:0] nb_wdata,
+	output reg        nb_ack,
+	output reg [63:0] nb_rdata,
+
 	input             DDRAM_BUSY,
 	output reg  [7:0] DDRAM_BURSTCNT,
 	output reg [28:0] DDRAM_ADDR,
@@ -54,7 +66,8 @@ module vram_ddr3
 	output reg        DDRAM_WE
 );
 
-localparam [7:0] FBURST = 8'd32;
+localparam [7:0]  FBURST  = 8'd32;
+localparam [28:0] NB_BASE = 29'h03FE_0000;    // 0x1FF0_0000 >> 3
 
 function [31:0] swap32;
 	input [31:0] w;
@@ -64,16 +77,17 @@ endfunction
 wire [31:0] wd_le = swap32(wdata);
 wire  [3:0] be_le = {be[0], be[1], be[2], be[3]};
 
-reg busy_rd, half;
+reg busy_rd, busy_nb, half;
 reg       fetching;
 reg [7:0] f_left;
 
 always @(posedge clk) begin
 	ack     <= 1'b0;
+	nb_ack  <= 1'b0;
 	f_ack   <= 1'b0;
 	f_valid <= 1'b0;
 	if (reset) begin
-		DDRAM_RD <= 0; DDRAM_WE <= 0; busy_rd <= 0; fetching <= 0;
+		DDRAM_RD <= 0; DDRAM_WE <= 0; busy_rd <= 0; busy_nb <= 0; fetching <= 0;
 		DDRAM_BURSTCNT <= 8'd1;
 	end
 	else begin
@@ -94,6 +108,13 @@ always @(posedge clk) begin
 				busy_rd <= 0;
 				rdata   <= swap32(half ? DDRAM_DOUT[63:32] : DDRAM_DOUT[31:0]);
 				ack     <= 1'b1;
+			end
+		end
+		else if (busy_nb) begin
+			if (DDRAM_DOUT_READY) begin
+				busy_nb  <= 0;
+				nb_rdata <= DDRAM_DOUT;
+				nb_ack   <= 1'b1;
 			end
 		end
 		else if (f_req && !f_ack && !DDRAM_BUSY && !(DDRAM_RD | DDRAM_WE)) begin
@@ -118,6 +139,20 @@ always @(posedge clk) begin
 			else begin
 				DDRAM_RD <= 1'b1;
 				busy_rd  <= 1'b1;
+			end
+		end
+		else if (nb_req && !nb_ack && !DDRAM_BUSY && !(DDRAM_RD | DDRAM_WE)) begin
+			DDRAM_BURSTCNT <= 8'd1;
+			DDRAM_ADDR     <= NB_BASE + {16'd0, nb_addr};
+			if (nb_we) begin
+				DDRAM_DIN <= nb_wdata;
+				DDRAM_BE  <= 8'hFF;
+				DDRAM_WE  <= 1'b1;
+				nb_ack    <= 1'b1;
+			end
+			else begin
+				DDRAM_RD <= 1'b1;
+				busy_nb  <= 1'b1;
 			end
 		end
 	end
