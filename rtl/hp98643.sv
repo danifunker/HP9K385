@@ -15,10 +15,12 @@
 //    +$8000-$BFFF  card RAM, big-endian 16-bit words.  The LANCE sees the
 //            same RAM at any address modulo 16 KB (NetBSD uses 0, the boot
 //            ROM $8000).
-//    +$C000-$FFFF  NOVRAM, one nibble per word in D3:0 (reads $FFFx), byte n
-//            at +$C000 + 4n high nibble first, 16 bytes mirrored every $40:
-//            0 copy select (0), 1 0, 2-7 the station address, 8-14 0,
-//            15 the sum of bytes 1-14.  Writes are ignored.
+//    +$C000-$FFFF  NOVRAM, 64 nibbles (one per word in D3:0, reads $FFFx),
+//            mirrored every $80; byte n at +$C000 + 4n high nibble first, two
+//            16-byte copies: 0 copy select (0), 1 0, 2-7 the station address,
+//            8-14 0, 15 the sum of bytes 1-14.  Writable (HP-UX's self-test
+//            writes patterns and checks them); reset and the card reset
+//            recall the image, as the NOVRAM's EEPROM recall does.
 //
 //  Card RAM reads come from block RAM: reg_wait holds a read for the clock
 //  the RAM needs (it depends on reg_sel/reg_we/reg_off only, not reg_cs).
@@ -98,9 +100,29 @@ function [7:0] mac_byte(input [3:0] n);
 	endcase
 endfunction
 localparam [7:0] NOV_SUM = MAC[47:40] + MAC[39:32] + MAC[31:24] + MAC[23:16] + MAC[15:8] + MAC[7:0];
-wire [3:0] nov_n    = reg_off[5:2];
-wire [7:0] nov_byte = nov_n == 4'd15 ? NOV_SUM : mac_byte(nov_n);
-wire [3:0] nov_nib  = reg_off[1] ? nov_byte[3:0] : nov_byte[7:4];
+function [3:0] nov_init(input [5:0] i);
+	reg [7:0] b;
+	begin
+		b = i[4:1] == 4'd15 ? NOV_SUM : mac_byte(i[4:1]);
+		nov_init = i[0] ? b[3:0] : b[7:4];
+	end
+endfunction
+
+wire [255:0] nov_img;                     // the recalled contents
+genvar gi;
+generate for (gi = 0; gi < 64; gi = gi + 1) begin : g_nov
+	assign nov_img[gi * 4 +: 4] = nov_init(gi);
+end endgenerate
+
+reg  [255:0] nov;
+wire   [5:0] nov_i = reg_off[6:1];
+always @(posedge clk) begin
+	if (reset || card_rst)
+		nov <= nov_img;
+	else if (reg_cs && reg_we && is_nov && reg_be[0])
+		nov[{nov_i, 2'b00} +: 4] <= reg_din[3:0];
+end
+wire [3:0] nov_nib = nov[{nov_i, 2'b00} +: 4];
 
 // ---- card RAM: true dual port, A = host, B = LANCE (rtl/wombat/dpram.v:
 // an altsyncram, two 8-bit halves for the byte lanes) ----

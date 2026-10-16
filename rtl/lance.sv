@@ -141,6 +141,7 @@ wire        m_loop = mode[2], m_dtcr = mode[3], m_coll = mode[4], m_intl = mode[
 reg  [7:0] lb [0:63];
 reg  [6:0] lb_len;
 reg        lb_pend;
+reg        lb_tint;                            // loopback TINT, raised with the RINT
 
 // ---- sequencer ----
 localparam [5:0]
@@ -214,7 +215,7 @@ always @(posedge clk) begin
 		rap <= 0; csr3 <= 0; mode <= 0;
 		{babl, miss, rint, tint, idon, inea, rxon, txon, tdmd, strt, init} <= 0;
 		stop <= 1'b1; idone <= 1'b0;
-		st <= S_IDLE; init_req <= 0; poll_req <= 0; poll_cnt <= 0; lb_pend <= 0;
+		st <= S_IDLE; init_req <= 0; poll_req <= 0; poll_cnt <= 0; lb_pend <= 0; lb_tint <= 0;
 	end
 	else begin
 		// ---- TX poll timer ----
@@ -382,7 +383,9 @@ always @(posedge clk) begin
 		S_TXCMP: begin
 			mwrite(t_desc + 24'd2, md1, 2'b11);
 			tpos <= (tpos + 7'd1) & tmask;
-			tint <= 1'b1;
+			// a looped frame's TINT waits for its receive (HP-UX allows only
+			// 30 status polls from TINT to RINT)
+			if (lb_pend) lb_tint <= 1'b1; else tint <= 1'b1;
 			poll_req <= 1'b1;                     // back-to-back
 			st <= S_IDLE;
 		end
@@ -457,7 +460,7 @@ always @(posedge clk) begin
 			st <= S_RXFIN;
 		end
 		S_RXFIN: begin
-			if (src_lb) lb_pend <= 1'b0;
+			if (src_lb) begin lb_pend <= 1'b0; if (lb_tint) tint <= 1'b1; lb_tint <= 1'b0; end
 			else rx_done <= 1'b1;
 			st <= src_lb ? S_IDLE : S_RXDRP;
 		end
@@ -474,7 +477,7 @@ always @(posedge clk) begin
 						rap <= 0; csr3 <= 0; mode <= 0;
 						{babl, miss, rint, tint, idon, inea, rxon, txon, tdmd, strt, init} <= 0;
 						stop <= 1'b1; idone <= 1'b0;
-						st <= S_IDLE; init_req <= 0; poll_req <= 0; lb_pend <= 0;
+						st <= S_IDLE; init_req <= 0; poll_req <= 0; lb_pend <= 0; lb_tint <= 0;
 						// a wire frame being received is dropped from S_IDLE (RXON off)
 					end
 				end

@@ -19,7 +19,7 @@
 // Tests:
 //   a  boot ROM register test (sub_0e784, brief 2.1 steps 1-11), plus the
 //      status byte, ACK and card-reset semantics and the ROM's RAM test
-//   b  NOVRAM: MAC, checksum, $FFFx reads, mirrors, writes ignored
+//   b  NOVRAM: MAC, checksum, $FFFx reads, mirrors, 64 writable nibbles, recall on card reset
 //   c  boot ROM loopback cases 1-6 (sub_0e88e, brief 2.2) with the exact
 //      template, plus a bad software FCS under DTCR and external loopback
 //   d  NetBSD attach/init/transmit/receive/interrupt sequence with every
@@ -517,11 +517,22 @@ task automatic test_novram();
 	// NetBSD's byte reads at odd offsets
 	rd8(16'hC009, b); chk(b == {4'hF, nb[2][7:4]}, $sformatf("byte read +$C009 = %h", b));
 	rd8(16'hC00B, b); chk(b == {4'hF, nb[2][3:0]}, $sformatf("byte read +$C00B = %h", b));
-	// writes are ignored
-	wr16(16'hC008, 16'h0000); wr16(16'hC00A, 16'h1234); wr8(16'hC00D, 8'h00);
-	rd16(16'hC008, q); chk(q == w[4], $sformatf("NOVRAM +$C008 changed by a write: %h", q));
-	rd16(16'hC00A, q); chk(q == w[5], $sformatf("NOVRAM +$C00A changed by a write: %h", q));
-	rd16(16'hC00C, q); chk(q == w[6], $sformatf("NOVRAM +$C00C changed by a write: %h", q));
+	// HP-UX's self-test (_hw_int_test, memory test on +$C000, 128 bytes):
+	// 64 distinct writable nibbles, mirrored every $80; then the card reset
+	// recalls the image (NOVRAM EEPROM recall)
+	for (int i = 0; i < 64; i++) wr16(16'hC000 + 16'(2 * i), 16'(i * 7 + 3));
+	for (int i = 0; i < 64; i++) begin
+		rd16(16'hC000 + 16'(2 * i), q);
+		chk(q == {12'hFFF, 4'(i * 7 + 3)}, $sformatf("NOVRAM nibble %0d after write = %h", i, q));
+		rd16(16'hD080 + 16'(2 * i), q);
+		chk(q == {12'hFFF, 4'(i * 7 + 3)}, $sformatf("NOVRAM mirror +$D080 nibble %0d after write = %h", i, q));
+	end
+	wr8(16'hC00D, 8'h0A); rd16(16'hC00C, q); chk(q == 16'hFFFA, $sformatf("NOVRAM byte write +$C00D: %h", q));
+	wr16(16'h0000, 16'h0001);                         // card reset: recall
+	for (int i = 0; i < 64; i++) begin
+		rd16(16'hC000 + 16'(2 * i), q);
+		chk(q == w[i % 32], $sformatf("NOVRAM nibble %0d after card reset = %h, want %h", i, q, w[i % 32]));
+	end
 endtask
 
 // =======================================================================
