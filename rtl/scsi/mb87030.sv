@@ -36,8 +36,11 @@
 //  Timing: MAME's chip-clock delays (8 MHz clocks) become cycle counters of
 //  N * ceil(CLK_HZ / 8 MHz); the selection time-out runs on an 8 MHz tick
 //  derived from CLK_HZ: ((TC & 0xFFFF00) + 15) * 2 chip clocks.  A bus
-//  that stays free for 10 ms while connected disconnects the SPC (MAME's
-//  bus-free timer).  Exception: a hardware (DMA) transfer in a data phase
+//  that stays free for a bus settle delay (400 ns) while connected
+//  disconnects the SPC: SSTS drops "connected" and INTS = 0x20.  MAME
+//  waits 10 ms for that; HP-UX 9 polls SSTS for bus free before every
+//  selection (it does not set PCTL[7]), so each command paid the 10 ms.
+//  Exception: a hardware (DMA) transfer in a data phase
 //  handshakes with no added delay (`fast`); the chip delays held DATA IN
 //  to ~470 KB/s and DATA OUT to ~1 MB/s.  Program transfers and the
 //  command / status / message phases keep them.
@@ -103,7 +106,7 @@ localparam [9:0]   D2      = 2 * T1;
 localparam [9:0]   D5      = 5 * T1;
 localparam [9:0]   D10     = 10 * T1;
 localparam [9:0]   D32     = 32 * T1;
-localparam integer BF_CLKS = CLK_HZ / 100;              // 10 ms bus-free timer
+localparam integer BF_CLKS = (CLK_HZ + 2_499_999) / 2_500_000;   // 400 ns bus settle (MAME: 10 ms)
 localparam integer BFW     = $clog2(BF_CLKS + 1);
 localparam [BFW-1:0] BF_LAST = BF_CLKS - 1;
 /* verilator lint_on WIDTHTRUNC */
@@ -164,6 +167,8 @@ wire [8:0] cv = diag ? {1'b0, dctl[7], dctl[6] | sdgc[6], dctl[5] | sdgc[7], dct
                      : bus_ctl;
 wire [7:0] bus_data = scsi_data_i;
 wire [2:0] phase    = cv[2:0];               // {MSG, C/D, I/O}
+wire       sel_gap  = (state == S_SEL_ID) || (state == S_SEL_SEL) ||
+                      (state == S_WAIT && (dstate == S_SEL_ID || dstate == S_SEL_SEL));
 // a hardware (DMA) transfer in a data phase handshakes without MAME's chip
 // delays: they cost ~70 clocks a byte (~470 KB/s) on DATA IN
 wire       fast     = dma_xfer && (phase[2:1] == 2'b00);
@@ -455,8 +460,10 @@ always @(*) begin
 	default: go(S_IDLE, 10'd0, 1'b0);
 	endcase
 
-	// ---- MAME's bus-free timer: 10 ms of free bus while connected ----
-	if (init_conn && !cv[3] && !cv[4]) begin
+	// ---- bus-free detection: BF_CLKS of free bus while connected.  Not
+	// from S_SEL_ID until SEL is out: a selection without arbitration is
+	// "connected" there with the bus still free (MAME's 10 ms never saw it) ----
+	if (init_conn && !cv[3] && !cv[4] && !sel_gap) begin
 		if (bf_cnt == BF_LAST) begin
 			disconnect();
 			set_ctrl(9'd0, L_ALL);

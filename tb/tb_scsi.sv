@@ -677,6 +677,7 @@ initial begin
 		reg [7:0] v, s, sc, m;
 		reg [2:0] ph;
 		int got;
+		time t_bf;
 		select(0, 0, 1, v);
 		chk(v == 8'h10, $sformatf("HP-UX abort: select INTS %02x", v));
 		clr_ints(v);
@@ -704,8 +705,14 @@ initial begin
 		wait_req(ph);
 		chk(ph == 3'd7, $sformatf("HP-UX abort: phase %0d, want MESSAGE IN", ph));
 		nbsd_in(m);
+		t_bf = $time;
 		wait_ints(v);
 		chk(v == 8'h20, $sformatf("HP-UX abort: bus free INTS %02x, want 20", v));
+		// HP-UX polls SSTS for bus free before its next selection, so the
+		// disconnect must follow the bus free at once (MAME waits 10 ms)
+		chk($time - t_bf < 50us, $sformatf("HP-UX abort: disconnect %0t after MESSAGE IN, want < 50 us", $time - t_bf));
+		rd(SSTS, s);
+		chk(s[7:5] == 3'b000, $sformatf("HP-UX abort: SSTS %02x after bus free, want not connected", s));
 		clr_ints(v);
 		wr(PCTL, 8'h00);
 		repeat (3000) @(negedge clk);

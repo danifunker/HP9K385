@@ -94,7 +94,7 @@ SCMD bits 7:5 select the command:
 
 | Bit | Meaning | Source |
 |---|---|---|
-| 0x20 | Disconnected | Set when the SPC is idle, PCTL[7] is set and every bus line is free (edge-triggered: it fires once per free-bus event). It is also set when the bus has been free for 10 ms while the SPC is connected (MAME's bus-free timer). In both cases INTS is set to exactly 0x20, as in MAME. |
+| 0x20 | Disconnected | Set when the SPC is idle, PCTL[7] is set and every bus line is free (edge-triggered: it fires once per free-bus event). It is also set when the bus has been free for 400 ns (a bus settle delay) while the SPC is connected; MAME waits 10 ms. The window between `S_SEL_ID` and SEL going out, where a selection without arbitration is already "connected" on a free bus, does not count. In both cases INTS is set to exactly 0x20, as in MAME. |
 | 0x10 | Command complete | Selection done, or transfer done. |
 | 0x08 | Service required | Phase mismatch when REQ arrived during a transfer. |
 | 0x04 | Time-out | Selection time-out. It sets TC to 0 and the SPC keeps driving SEL. Writing INTS with bit 2 set and TC = 0 ends the selection and releases the bus. Writing it with TC ≠ 0 starts the selection again. |
@@ -111,7 +111,7 @@ MAME counts delays in 8 MHz chip clocks. Here they are converted to cycles as `N
 
 The selection time-out is `((TC & 0xFFFF00) + 15) * 2` chip clocks. They are counted on an 8 MHz tick that is derived from `CLK_HZ` with a fractional accumulator, so the time-out is exact on average. For example, TC = 0x002003 gives about 2 ms.
 
-The bus-free disconnect timer is 10 ms, which is `CLK_HZ / 100` cycles.
+The bus-free disconnect delay is 400 ns, which is `ceil(CLK_HZ / 2.5 MHz)` cycles (14 at 33 MHz). MAME uses 10 ms. HP-UX 9 does not set PCTL[7]: before every selection it polls SSTS until the SPC is no longer connected. So with 10 ms, every HP-UX command cost about 12 ms: 8 KB raw reads ran at 440 KB/s, against 1.19 MB/s with 64 KB transfers.
 
 MAME's 10-clock delay between receiving a byte and sending ACK limited DATA IN to about 2.1 µs per byte at 33 MHz (about 470 KB/s), and DATA OUT ran at about 1 MB/s. Real parts do about 1.5 MB/s in asynchronous mode. So a hardware (DMA) transfer in a data phase now skips every handshake delay (`fast` in the RTL; see Deviations). `tb_scsi_dma` times a 16-block DMA WRITE(10) and READ(10): 260k / 588k clocks before, about 96k each after (~6k clocks, ~180 µs, a block). Program transfers and the command, status and message phases keep MAME's delays, so the PIO paths the drivers were checked against are unchanged.
 
@@ -150,6 +150,7 @@ HP-UX 9 ends its SCSI bus reset with SCMD = 0x10 (RST), SCTL = 0xC0, SCMD = 0, s
 - INTS write-to-clear only clears bits that were set before the write.
 - `dreq` for DATA OUT stops once TC bytes are queued. MAME only drops it when the FIFO is full and relies on the DMA count.
 - Reset-and-disable also clears the data lines. MAME leaves them.
+- Bus free while connected disconnects after 400 ns, not MAME's 10 ms (see "Timeouts and delays").
 - DMA data phases handshake with no chip-clock delays (see "Timeouts and delays"). On HP-UX 9 the old delays held raw-disk reads to ~375 KB/s with 64 KB transfers.
 - MAME's own quirk is kept: a phase mismatch clears SPC_BUSY but not XFER_IN_PROGRESS.
 - SCTL[7] (reset & disable) releases RST and clears SCMD and INTS. MAME leaves RST on the bus until the next SCMD write with SCTL[7] clear.
