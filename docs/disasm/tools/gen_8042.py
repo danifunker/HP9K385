@@ -117,7 +117,7 @@ COMMENTS = {
     0x09C: 'commands 0x88-0x8F: RAM[R5] += data (with carry into the next bytes)',
     0x0E9: 'P1 = 0x20, pulse latch enable, then SN76494 writes 9F BF FF DF (silence ch 0-3)',
     0x100: 'command byte decoder',
-    0x107: '0x00-0x1F: deferred command, R6 = cmd; RAM[5] |= 0x20; main loop executes it',
+    0x107: '0x00-0x1F: deferred read, bank-1 R6 = cmd; RAM[5] |= 0x20; main loop (0x27D) sends RAM[cmd]',
     0x112: '0x80-0xFF',
     0x114: '0x80-0xBF: R5 = cmd & 0x3F = data pointer for the following data bytes',
     0x11D: '0xC0-0xFF',
@@ -129,7 +129,7 @@ COMMENTS = {
     0x136: 'cmd 0xC5: MLC trigger (NetBSD HIL_TRIGGER)',
     0x13A: '0xE0-0xEF: R5 = 0xF0 | n (next data byte -> RAM[0x70 + n]; NetBSD BBC_SET_REG = 0xE0)',
     0x141: '0xF0-0xFF: R6 = 0x70 | n: deferred read of RAM[0x70 + n] back to the host',
-    0x148: '0x20-0x3F: copy RAM[cmd-5..cmd] -> RAM[0x12..0x17]',
+    0x148: '0x20-0x3F: copy RAM[cmd-4..cmd] -> RAM[0x13..0x17] (0x31: tick counter 0x2D.. snapshot)',
     0x156: '0x40-0x7F: RAM[4] = (RAM[4] & 0xE0) | (cmd & 0x1F)  (e.g. 0x5C/0x5D int on/off)',
     0x16D: '0x90-0x9F / 0xB0-0xBF',
     0x173: 'P2.6 high: release host NMI (e.g. cmd 0xB2, NetBSD HIL_CNMT)',
@@ -172,6 +172,19 @@ COMMENTS = {
     0x5F1: 'latch = 0x20 (RTC deselected), P1 = 0xFF',
     0x6D0: 'MOVP: table in page 6',
     0x6F1: 'P2.6 low: assert host NMI (keyboard reset sequence)',
+    # boot ROM interaction (docs/reference/rom_paths.md)
+    0x040: 'cold start: begin loop configuration (sub_70b)',
+    0x043: 'R2 bit 0: send 0x8E once the loop configuration has ended (post_init)',
+    0x059: 'RAM[0x7B] = 0x17: loop control default (host writes it with 0xEB)',
+    0x05E: 'post_init: 0x8E only when loop status RAM[0x7A] has b3 (config good) or b7 (failed)',
+    0x069: 'warm start: 0x8E at once, no loop configuration; RAM[0x11/0x12/0x7A] kept',
+    0x22D: 'RAM[0x7B] bit 7 (host wrote 0xEB with bit 7) -> reconfigure the loop',
+    0x27D: 'deferred read: OUT RAM[R6] with STS 0x40 (boot ROM sends 0x05, 0x11, 0x12)',
+    0x1C2: 'loop configured: RAM[0x7A] |= 0x08, bit 7 cleared',
+    0x70E: 'loop status RAM[0x7A] = A (0 at the start, 0x80 = failed from 0x700)',
+    0x711: 'RAM[0x11] = 0x30: no keyboard yet',
+    0x739: 'first frame after a (re)configure: W1 = 0x08 (command), W0 = 0xFE',
+    0x7B7: 'first device found: RAM[0x12] = ID & 0x1F (language), RAM[0x11] = 0x28 or 0x2A',
 }
 
 
