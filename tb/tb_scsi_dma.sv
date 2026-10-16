@@ -372,6 +372,31 @@ task automatic nb_cmd(input int tgt, input [7:0] cdb[16], input int clen, input 
 				rd(INTS, ints);
 			end
 		end
+		3'd0: begin                                    // DATA OUT, always by DMA here
+			reg [15:0] dcmd;
+			card_wr(10'h3, 8'h00);                     // HCONF
+			cmd = CSR_IE | CSR_DMA32;
+			dcmd = 16'h8000 | 16'h0010 | 16'h0100 | 16'h0004;   // START | IPL 4 | LWORD | OUT
+			dma_arm(dma_ch, MBASE + off, dlen / 4 - 1, dcmd);
+			card_wr(10'h1, cmd);
+			cmd = cmd | (dma_ch ? CSR_DE1 : CSR_DE0);
+			card_wr(10'h1, cmd);
+			wr(TCH, dlen >> 16); wr(TCM, dlen >> 8); wr(TCL, dlen);
+			wr(PCTL, 8'h80 | 8'd0);
+			wr(SCMD, 8'h80);
+			wait_intr(ints);
+			do rd(SSTS, s); while (s[5]);
+			dma_clear(dma_ch);
+			card_rd(10'h1, cmd);
+			card_wr(10'h1, cmd & ~(CSR_DE1 | CSR_DE0));
+			rd(TCH, v); resid = v << 16;
+			rd(TCM, v); resid = resid | (v << 8);
+			rd(TCL, v); resid = resid | v;
+			got = dlen - resid;
+			rd(INTS, ints);
+			chk(ints == 8'h10, $sformatf("ID %0d: DMA out INTS %02x", tgt, ints));
+			dleft -= got;
+		end
 		3'd3: begin
 			manual_in(3'd3, stat);
 			rd(INTS, ints);                            // spc_intr: goto loop
@@ -511,6 +536,34 @@ initial begin
 	acc_dly = 8;
 	dma_ch = 1;
 	probe(1, 8'h00, 8'h00, "SCSI DISK       ", 8'h02);
+
+	//---- 4. an 8 KB file-system block (HP-UX HFS) written and read back by
+	// longword DMA, timed ----
+	$display("-- WRITE(10) and READ(10) of 16 blocks by DMA, timed");
+	acc_dly = 10;
+	begin
+		int bad, w0, r0;
+		time t0;
+		for (int i = 0; i < 8192; i++) mem['h2000 + i] = $urandom;
+		for (int i = 0; i < 16; i++) cdb[i] = 0;
+		cdb[0] = 8'h2A; cdb[5] = 8; cdb[8] = 16;
+		w0 = d0.writes; t0 = $time;
+		nb_cmd(0, cdb, 10, 8192, 'h2000, st, got);
+		chk(st == 8'h00 && got == 8192, $sformatf("WRITE(10): status %02x, %0d bytes", st, got));
+		$display("WRITE(10) 16 blocks: %0d clocks, %0d block requests", ($time - t0) / 30, d0.writes - w0);
+		bad = 0;
+		for (int i = 0; i < 8192; i++) if (d0.img[8 * 512 + i] != mem['h2000 + i]) bad++;
+		chk(bad == 0, $sformatf("WRITE(10): %0d bytes differ in the image", bad));
+		for (int i = 0; i < 8192; i++) mem[i] = 8'h00;
+		cdb[0] = 8'h28;
+		r0 = d0.reads; t0 = $time;
+		nb_cmd(0, cdb, 10, 8192, 'h0000, st, got);
+		chk(st == 8'h00 && got == 8192, $sformatf("READ(10): status %02x, %0d bytes", st, got));
+		$display("READ(10) 16 blocks: %0d clocks, %0d block requests", ($time - t0) / 30, d0.reads - r0);
+		bad = 0;
+		for (int i = 0; i < 8192; i++) if (mem[i] != mem['h2000 + i]) bad++;
+		chk(bad == 0, $sformatf("READ(10) after WRITE(10): %0d bytes differ", bad));
+	end
 
 	errors += d0.errors;
 	if (errors == 0) $display("ALL TESTS PASSED");
