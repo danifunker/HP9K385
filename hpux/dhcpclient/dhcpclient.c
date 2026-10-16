@@ -1,7 +1,7 @@
 /*
- * dhcpc - minimal DHCP client for HP-UX 9 (no DHCP client ships with it).
+ * dhcpclient - minimal DHCP client for HP-UX 9 (no DHCP client ships with it).
  *
- *   dhcpc MAC [HOSTNAME]        MAC as 080009385001 or 0x080009385001
+ *   dhcpclient MAC [HOSTNAME]        MAC as 080009385001 or 0x080009385001
  *
  * Broadcasts DISCOVER and REQUEST from port 68 with the broadcast flag set,
  * so the server's replies come back to 255.255.255.255:68 and the interface
@@ -9,9 +9,21 @@
  *
  *   IP NETMASK ROUTER LEASE_SECONDS SERVER
  *
- * and exits 0; the caller (dhcpc.sh) configures lan0.  Exit 1 on failure.
- * Build: c89 -o dhcpc dhcpc.c
+ * then, if the server sent them, DNS server addresses and the domain:
+ *
+ *   IP NETMASK ROUTER LEASE_SECONDS SERVER
+ *   DNS a.b.c.d [e.f.g.h ...]
+ *   DOMAIN name
+ *
+ * and exits 0; the caller (dhcpclient.sh) configures lan0 and /etc/resolv.conf.
+ * Exit 1 on failure.
+ * Build: c89 -o dhcpclient dhcpclient.c
  */
+#if defined(__hpux) || defined(hpux)
+#ifndef _HPUX_SOURCE
+#define _HPUX_SOURCE            /* c89 is strict ANSI: BSD sockets need this */
+#endif
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -33,6 +45,9 @@ static unsigned long xid;
 static char *hostname = 0;
 
 static unsigned long yiaddr, mask, router, lease, server;
+static unsigned long dns[4];
+static int ndns;
+static char domain[256];
 
 static int hexval(int c)
 {
@@ -73,7 +88,7 @@ static int build(int type, unsigned long req_ip, unsigned long srv)
 	if (hostname && (n = strlen(hostname)) > 0 && n < 64) {
 		*o++ = 12; *o++ = n; memcpy(o, hostname, n); o += n;
 	}
-	*o++ = 55; *o++ = 4; *o++ = 1; *o++ = 3; *o++ = 51; *o++ = 54;
+	*o++ = 55; *o++ = 6; *o++ = 1; *o++ = 3; *o++ = 6; *o++ = 15; *o++ = 51; *o++ = 54;
 	*o++ = 255;
 	n = o - pkt;
 	return n < 300 ? 300 : n;
@@ -102,6 +117,12 @@ static int parse(int len)
 		case 3:  if (l >= 4) router = get32(o); break;
 		case 51: if (l >= 4) lease = get32(o); break;
 		case 54: if (l >= 4) server = get32(o); break;
+		case 6:
+			for (ndns = 0; ndns < 4 && ndns * 4 + 4 <= l; ndns++) dns[ndns] = get32(o + ndns * 4);
+			break;
+		case 15:
+			memcpy(domain, o, l); domain[l] = 0;
+			break;
 		}
 		o += l;
 	}
@@ -119,7 +140,7 @@ static int exchange(int s, int len, int want)
 	to.sin_addr.s_addr = htonl(0xFFFFFFFFUL);
 	for (tries = 0; tries < 6; tries++) {
 		if (sendto(s, (char *)pkt, len, 0, (struct sockaddr *)&to, sizeof to) < 0) {
-			perror("dhcpc: sendto");
+			perror("dhcpclient: sendto");
 			return 0;
 		}
 		for (t = 0; t < 4; t++) {           /* up to ~4 s for a reply */
@@ -155,7 +176,7 @@ int main(int argc, char **argv)
 	char a[20], b[20], c[20], d[20];
 
 	if (argc < 2) {
-		fprintf(stderr, "usage: dhcpc MAC [HOSTNAME]\n");
+		fprintf(stderr, "usage: dhcpclient MAC [HOSTNAME]\n");
 		return 1;
 	}
 	m = argv[1];
@@ -164,7 +185,7 @@ int main(int argc, char **argv)
 		int h, l;
 		while (*m == ':' || *m == '-') m++;
 		h = hexval(m[0]); l = h < 0 ? -1 : hexval(m[1]);
-		if (h < 0 || l < 0) { fprintf(stderr, "dhcpc: bad MAC\n"); return 1; }
+		if (h < 0 || l < 0) { fprintf(stderr, "dhcpclient: bad MAC\n"); return 1; }
 		mac[i] = h * 16 + l; m += 2;
 	}
 	if (argc > 2) hostname = argv[2];
@@ -172,23 +193,29 @@ int main(int argc, char **argv)
 	xid = ((unsigned long)now.tv_sec << 8) ^ now.tv_usec ^ ((unsigned long)mac[4] << 8) ^ mac[5];
 
 	s = socket(AF_INET, SOCK_DGRAM, 0);
-	if (s < 0) { perror("dhcpc: socket"); return 1; }
+	if (s < 0) { perror("dhcpclient: socket"); return 1; }
 	setsockopt(s, SOL_SOCKET, SO_BROADCAST, (char *)&on, sizeof on);
 	setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (char *)&on, sizeof on);
 	memset(&me, 0, sizeof me);
 	me.sin_family = AF_INET;
 	me.sin_port = htons(68);
 	me.sin_addr.s_addr = htonl(INADDR_ANY);
-	if (bind(s, (struct sockaddr *)&me, sizeof me) < 0) { perror("dhcpc: bind"); return 1; }
+	if (bind(s, (struct sockaddr *)&me, sizeof me) < 0) { perror("dhcpclient: bind"); return 1; }
 
 	len = build(DISCOVER, 0, 0);
-	if (exchange(s, len, OFFER) != OFFER) { fprintf(stderr, "dhcpc: no offer\n"); return 1; }
+	if (exchange(s, len, OFFER) != OFFER) { fprintf(stderr, "dhcpclient: no offer\n"); return 1; }
 	offer_ip = yiaddr; offer_srv = server;
 	len = build(REQUEST, offer_ip, offer_srv);
-	if (exchange(s, len, ACK) != ACK) { fprintf(stderr, "dhcpc: no ack\n"); return 1; }
+	if (exchange(s, len, ACK) != ACK) { fprintf(stderr, "dhcpclient: no ack\n"); return 1; }
 
 	if (!mask) mask = 0xFFFFFF00UL;
 	ipstr(yiaddr, a); ipstr(mask, b); ipstr(router, c); ipstr(server, d);
 	printf("%s %s %s %lu %s\n", a, b, c, lease, d);
+	if (ndns > 0) {
+		printf("DNS");
+		for (i = 0; i < ndns; i++) { ipstr(dns[i], a); printf(" %s", a); }
+		printf("\n");
+	}
+	if (domain[0]) printf("DOMAIN %s\n", domain);
 	return 0;
 }
