@@ -7,7 +7,7 @@
 //     consecutive clocks
 //   - unmapped keys (Scroll Lock, Num Lock, E0 12 fake shift, F13-ish $08)
 //     give no strobe; no strobe out of reset
-//   - sweep of all 512 {E0, code} values: only Ctrl and the ISO 102nd key (= \\ |) are deliberate
+//   - sweep of all 512 {E0, code} values: only Ctrl and the ISO 102nd key (= \ |) are deliberate
 //     many-to-one mapping, and every make code is even
 //
 // Expected codes are hand-computed from MAME hlekbd.cpp itf_basic:
