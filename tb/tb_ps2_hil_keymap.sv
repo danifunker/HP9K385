@@ -7,7 +7,7 @@
 //     consecutive clocks
 //   - unmapped keys (Scroll Lock, Num Lock, E0 12 fake shift, F13-ish $08)
 //     give no strobe; no strobe out of reset
-//   - sweep of all 512 {E0, code} values: only Ctrl is a deliberate
+//   - sweep of all 512 {E0, code} values: only Ctrl and the ISO 102nd key (= \\ |) are deliberate
 //     many-to-one mapping, and every make code is even
 //
 // Expected codes are hand-computed from MAME hlekbd.cpp itf_basic:
@@ -120,6 +120,7 @@ initial begin
 	// modifiers
 	key("L Shift",    0, 8'h12, 8'h0A);   // COL8  bit 5: (8^8)=0 -> $00 | $0A
 	key("R Shift",    0, 8'h59, 8'h08);   // COL8  bit 4
+	key("ISO 102nd",  0, 8'h61, 8'hCA);   // \ | as $5D (UK keyboards, remote typing)
 	key("L Ctrl",     0, 8'h14, 8'h0C);   // COL8  bit 6: Control
 	key("R Ctrl",     1, 8'h14, 8'h0C);   // COL8  bit 6: Control (E0 14)
 	key("L Alt",      0, 8'h11, 8'h06);   // COL8  bit 3: Extend char L
@@ -189,7 +190,6 @@ initial begin
 	none("Num Lock up", 0, 8'h77, 0);
 	none("fake shift",  1, 8'h12, 1);
 	none("$08",         0, 8'h08, 1);
-	none("ISO 102nd",   0, 8'h61, 1);
 
 	// sweep every {E0, code} as a press
 	for (i = 0; i < 128; i = i + 1) seen[i] = 0;
@@ -210,7 +210,7 @@ initial begin
 			end
 			if (seen[got[7:1]] != 0) begin
 				ndup = ndup + 1;
-				if (got !== 8'h0C) begin
+				if (got !== 8'h0C && got !== 8'hCA) begin
 					$display("FAIL sweep %h: code %h already from %h", i[8:0], got, first_of[got[7:1]]);
 					errors = errors + 1;
 				end
@@ -219,7 +219,7 @@ initial begin
 			seen[got[7:1]] = seen[got[7:1]] + 1;
 		end
 	end
-	if (ndup !== 1) begin $display("FAIL sweep: %0d duplicate codes, expected 1 (Ctrl)", ndup); errors = errors + 1; end
+	if (ndup !== 2) begin $display("FAIL sweep: %0d duplicate codes, expected 2 (Ctrl, ISO 102nd)", ndup); errors = errors + 1; end
 	$display("sweep: %0d PS/2 keys mapped", nmapped);
 
 	if (errors == 0) $display("ALL TESTS PASSED");

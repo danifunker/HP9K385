@@ -59,8 +59,9 @@
 //  and $00 (see KP 5).  Num Lock and Scroll Lock are not used: Main_MiSTer
 //  swallows their make for joystick/mouse emulation and passes only the
 //  break, which would arrive here as a lone release.  The ISO 102nd key
-//  ($61) is not mapped either (Linux puts KEY_102ND at $EC, MAME has it
-//  unused).
+//  ($61) gives backslash/bar like $5D: the ITF has no such key (Linux puts
+//  KEY_102ND at $EC, MAME leaves it unused), it is \ | on UK keyboards, and
+//  remote-keyboard tools type backslash with it.
 //============================================================================
 
 module ps2_hil_keymap (
@@ -129,6 +130,7 @@ always @(*) begin
 	9'h054: ent = hk(8'hC6);    // [ {        COL4.3
 	9'h05B: ent = hk(8'hC8);    // ] }        COL4.4
 	9'h05D: ent = hk(8'hCA);    // \ |        COL4.5
+	9'h061: ent = hk(8'hCA);    // ISO 102nd key: \ | as $5D
 	9'h04C: ent = hk(8'hD6);    // ; :        COL5.3
 	9'h052: ent = hk(8'hD8);    // ' "        COL5.4
 	9'h041: ent = hk(8'hE2);    // , <        COL6.1
