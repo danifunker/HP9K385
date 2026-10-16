@@ -71,6 +71,7 @@ localparam CONF_STR = {
 	"SC2,ISOCUECHD,CD-ROM (SCSI 2);",
 	"-;",
 	"O[4:2],RAM,8 MB,16 MB,32 MB,64 MB,128 MB (128 MB SDRAM);",
+	"O[5],Fast boot (no RAM test),No,Yes;",
 	"O[122:121],Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
 	"-;",
 	"T[0],Reset;",
@@ -254,8 +255,9 @@ ps2_hil_keymap keymap
 reg         mouse_t;
 always @(posedge clk_sys) mouse_t <= ps2_mouse[24];
 
-reg   [7:0] pal_idx;
-wire [23:0] pal_rgb;
+// scanout <-> Nereid colormap lookup
+wire  [7:0] so_video, so_overlay;
+wire [23:0] so_rgb;
 
 hp385_top machine
 (
@@ -318,8 +320,9 @@ hp385_top machine
 	.audio(beep),
 	.display_enable(display_enable),
 	.gfx_unsupported(),
-	.pix_index(pal_idx),
-	.pix_rgb(pal_rgb),
+	.pix_video(so_video),
+	.pix_overlay(so_overlay),
+	.pix_rgb(so_rgb),
 
 	.ev_stb(), .ev_kind(), .ev_addr(), .ev_be(), .ev_write(), .ev_data(), .ev_fc(), .ev_walker(),
 	.cpu_halted(),
@@ -347,6 +350,26 @@ rom_bram #(.AW(13)) card_rom
 	.raddr(mem_addr[14:2]), .q(card_q)
 );
 
+// Fast boot (OSD): the boot ROM as it is read, without the cold-boot RAM
+// test (0x46A: 7A02 -> 7A00) and therefore without its checksum step (0x18F6:
+// BSR checksum -> MOVEQ #0,D0 / NOP), as docs/disasm/tools/bootrom_simpatch.py
+// does for the sim.  Each word is replaced only if it holds the expected
+// original, so another ROM revision is left alone.
+wire fast_boot = status[5];
+function [31:0] boot_patch;
+	input [31:0] q;
+	input [14:0] a;                           // longword address
+	input        en;
+	begin
+		boot_patch = q;
+		if (en) begin
+			if (a == 15'h011A && q[15:0]  == 16'h7A02) boot_patch[15:0]  = 16'h7A00;
+			if (a == 15'h063D && q[15:0]  == 16'h6100) boot_patch[15:0]  = 16'h7000;
+			if (a == 15'h063E && q[31:16] == 16'h375A) boot_patch[31:16] = 16'h4E71;
+		end
+	end
+endfunction
+
 // ROM beats: the address is held with mem_req, so q is valid the clock after
 // the request is seen; ack one clock after that (one pulse per request)
 reg         rom_busy;
@@ -356,7 +379,7 @@ always @(posedge clk_sys) begin
 	else if (rom_busy) begin
 		rom_busy  <= 1'b0;
 		rom_ack   <= 1'b1;
-		rom_rdata <= (mem_sel == 2'd0) ? boot_q : card_q;
+		rom_rdata <= (mem_sel == 2'd0) ? boot_patch(boot_q, mem_addr[16:2], fast_boot) : card_q;
 	end
 	else if (mem_req && mem_rom && !rom_ack) rom_busy <= 1'b1;
 end
@@ -415,6 +438,11 @@ vram_ddr3 #(.BASE(29'h0600_0000)) vram
 	.wdata(vram_wdata),
 	.ack(vram_ack),
 	.rdata(vram_rdata),
+	.f_req(f_req),
+	.f_addr(f_addr),
+	.f_ack(f_ack),
+	.f_valid(f_valid),
+	.f_data(f_data),
 	.DDRAM_BUSY(DDRAM_BUSY),
 	.DDRAM_BURSTCNT(DDRAM_BURSTCNT),
 	.DDRAM_ADDR(DDRAM_ADDR),
@@ -426,45 +454,52 @@ vram_ddr3 #(.BASE(29'h0600_0000)) vram
 	.DDRAM_WE(DDRAM_WE)
 );
 
-assign FB_EN          = 1'b1;
-assign FB_FORMAT      = 5'b00011;               // 8 bpp, palette
+// The 98550A display: both VRAM banks scanned out of DDR3 by the core
+// (rtl/scanout.sv), overlay over video through the Nereid colormaps; the
+// MiSTer framebuffer is off (it can show only one 8-bit buffer, and HP's
+// X server draws the pointer in the overlay bank).
+wire        f_req, f_ack, f_valid;
+wire [28:0] f_addr;
+wire [63:0] f_data;
+wire        so_hs, so_vs, so_de;
+wire [23:0] so_pix;
+
+scanout #(.BASE(29'h0600_0000), .OVL(29'h0604_0000)) scan
+(
+	.clk(clk_sys),
+	.reset(!pll_locked),
+	.f_req(f_req),
+	.f_addr(f_addr),
+	.f_ack(f_ack),
+	.f_valid(f_valid),
+	.f_data(f_data),
+	.pix_video(so_video),
+	.pix_overlay(so_overlay),
+	.pix_rgb(so_rgb),
+	.hs(so_hs),
+	.vs(so_vs),
+	.de(so_de),
+	.rgb(so_pix)
+);
+
+assign FB_EN          = 1'b0;
+assign FB_FORMAT      = 5'b00011;
 assign FB_WIDTH       = 12'd1280;
 assign FB_HEIGHT      = 12'd1024;
 assign FB_BASE        = 32'h3000_0000;
 assign FB_STRIDE      = 14'd2048;
-assign FB_FORCE_BLANK = reset;
+assign FB_FORCE_BLANK = 1'b0;
+assign FB_PAL_CLK     = clk_sys;
+assign FB_PAL_ADDR    = 8'd0;
+assign FB_PAL_DOUT    = 24'd0;
+assign FB_PAL_WR      = 1'b0;
 
-// Palette mirror: walk the 256 indices continuously; each lookup through
-// the Nereid takes a clock, so write the previous index's colour.
-reg [7:0] pal_idx_d;
-always @(posedge clk_sys) begin
-	pal_idx   <= pal_idx + 8'd1;
-	pal_idx_d <= pal_idx;
-end
-assign FB_PAL_CLK  = clk_sys;
-assign FB_PAL_ADDR = pal_idx_d;
-assign FB_PAL_DOUT = pal_rgb;
-assign FB_PAL_WR   = 1'b1;
-
-// The core's own video output only carries a blank frame (the framebuffer
-// drives HDMI): 1280 x 1024 timing at clk_sys / 1 is not needed, so a slow
-// placeholder keeps the scaler's input defined.
-reg  [10:0] hc;
-reg  [9:0]  vc;
-reg         ce_pix;
-always @(posedge clk_sys) begin
-	ce_pix <= ~ce_pix;
-	if (ce_pix) begin
-		hc <= (hc == 11'd799) ? 11'd0 : hc + 11'd1;
-		if (hc == 11'd799) vc <= (vc == 10'd524) ? 10'd0 : vc + 10'd1;
-	end
-end
 assign CLK_VIDEO = clk_sys;
-assign CE_PIXEL  = ce_pix;
-assign VGA_HS    = (hc >= 11'd656 && hc < 11'd752);
-assign VGA_VS    = (vc >= 10'd490 && vc < 10'd492);
-assign VGA_DE    = (hc < 11'd640 && vc < 10'd480);
-assign {VGA_R, VGA_G, VGA_B} = 24'd0;
+assign CE_PIXEL  = 1'b1;
+assign VGA_HS    = so_hs;
+assign VGA_VS    = so_vs;
+assign VGA_DE    = so_de;
+assign {VGA_R, VGA_G, VGA_B} = so_pix;
 
 // Activity: the boot ROM's diagnostic LEDs are active low; light the user
 // LED while any is lit after the self-test, and during ROM downloads.

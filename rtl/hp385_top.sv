@@ -116,7 +116,8 @@ module hp385_top
 	output            gfx_unsupported,
 	// colour of a video pixel value through the Nereid (display enable and
 	// plane mask applied; overlay not composited), one clock of latency
-	input       [7:0] pix_index,
+	input       [7:0] pix_video,          // scanout: video and overlay bytes of a pixel
+	input       [7:0] pix_overlay,
 	output     [23:0] pix_rgb,
 
 	// trace port
@@ -626,8 +627,8 @@ nereid nereid (
 	.reg_word(io16_addr[7:1]),
 	.din(io16_wdata[7:0]),
 	.dout(ner_dout),
-	.pix_video(pix_index & display_enable),
-	.pix_overlay(8'd0),
+	.pix_video(pix_video & display_enable),
+	.pix_overlay(pix_overlay),
 	.pix_rgb(pix_rgb)
 );
 

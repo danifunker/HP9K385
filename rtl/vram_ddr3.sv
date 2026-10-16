@@ -14,6 +14,10 @@
 //  Writes are posted: acknowledged as soon as DDR3 takes them (the Avalon
 //  port keeps requests in order, so a later read sees them).  Reads hold the
 //  request until DDRAM_DOUT_READY.  One request at a time.
+//
+//  Scanout fetch (f_*, rtl/scanout.sv): burst reads of FBURST beats, served
+//  ahead of the VRAM port whenever the Avalon port is free; the beats come
+//  back registered on f_valid / f_data.  VRAM requests wait meanwhile.
 //============================================================================
 
 module vram_ddr3
@@ -32,8 +36,15 @@ module vram_ddr3
 	output reg        ack,
 	output reg [31:0] rdata,
 
+	// scanout burst reads
+	input             f_req,
+	input      [28:0] f_addr,
+	output reg        f_ack,
+	output reg        f_valid,
+	output reg [63:0] f_data,
+
 	input             DDRAM_BUSY,
-	output      [7:0] DDRAM_BURSTCNT,
+	output reg  [7:0] DDRAM_BURSTCNT,
 	output reg [28:0] DDRAM_ADDR,
 	input      [63:0] DDRAM_DOUT,
 	input             DDRAM_DOUT_READY,
@@ -43,7 +54,7 @@ module vram_ddr3
 	output reg        DDRAM_WE
 );
 
-assign DDRAM_BURSTCNT = 8'd1;
+localparam [7:0] FBURST = 8'd32;
 
 function [31:0] swap32;
 	input [31:0] w;
@@ -54,25 +65,48 @@ wire [31:0] wd_le = swap32(wdata);
 wire  [3:0] be_le = {be[0], be[1], be[2], be[3]};
 
 reg busy_rd, half;
+reg       fetching;
+reg [7:0] f_left;
 
 always @(posedge clk) begin
-	ack <= 1'b0;
+	ack     <= 1'b0;
+	f_ack   <= 1'b0;
+	f_valid <= 1'b0;
 	if (reset) begin
-		DDRAM_RD <= 0; DDRAM_WE <= 0; busy_rd <= 0;
+		DDRAM_RD <= 0; DDRAM_WE <= 0; busy_rd <= 0; fetching <= 0;
+		DDRAM_BURSTCNT <= 8'd1;
 	end
 	else begin
 		if (!DDRAM_BUSY) begin
 			DDRAM_RD <= 0;
 			DDRAM_WE <= 0;
 		end
-		if (busy_rd) begin
+		if (fetching) begin
+			if (DDRAM_DOUT_READY) begin
+				f_valid <= 1'b1;
+				f_data  <= DDRAM_DOUT;
+				f_left  <= f_left - 8'd1;
+				if (f_left == 8'd1) fetching <= 0;
+			end
+		end
+		else if (busy_rd) begin
 			if (DDRAM_DOUT_READY) begin
 				busy_rd <= 0;
 				rdata   <= swap32(half ? DDRAM_DOUT[63:32] : DDRAM_DOUT[31:0]);
 				ack     <= 1'b1;
 			end
 		end
+		else if (f_req && !f_ack && !DDRAM_BUSY && !(DDRAM_RD | DDRAM_WE)) begin
+			// scanout first
+			DDRAM_ADDR     <= f_addr;
+			DDRAM_BURSTCNT <= FBURST;
+			DDRAM_RD       <= 1'b1;
+			f_ack          <= 1'b1;
+			fetching       <= 1'b1;
+			f_left         <= FBURST;
+		end
 		else if (req && !ack && !DDRAM_BUSY && !(DDRAM_RD | DDRAM_WE)) begin
+			DDRAM_BURSTCNT <= 8'd1;
 			DDRAM_ADDR <= BASE + {9'd0, addr[21:3]};
 			half       <= addr[2];
 			if (we) begin
