@@ -9,16 +9,20 @@ NAME=`hostname`
 MAC=`lanscan | awk '/lan0/ { for (i = 1; i <= NF; i++) if ($i ~ /^0x/) { print $i; exit } }'`
 if [ -z "$MAC" ]; then echo "dhcpclient.sh: no lan0"; exit 1; fi
 
+nodefault() {   # HP-UX 9 routes even 255.255.255.255 through a gateway
+	for g in `netstat -rn | awk '$1 == "default" { print $2 }'`; do
+		route delete default $g >/dev/null 2>&1
+	done
+}
+
 lease() {
-	OUT=`dhcpclient $MAC $NAME` || return 1
+	nodefault
+	OUT=`dhcpclient -z $MAC $NAME` || return 1
 	set -- `echo "$OUT" | head -1`
 	IP=$1; MASK=$2; GW=$3; LEASE=$4
 	ifconfig lan0 inet $IP netmask $MASK up
 	if [ "$GW" != "0.0.0.0" ]; then
-		# replace every default route (the static set-up may have added one)
-		for g in `netstat -rn | awk '$1 == "default" { print $2 }'`; do
-			route delete default $g >/dev/null 2>&1
-		done
+		nodefault       # including the one the 0.0.0.0 request left
 		route add default $GW 1 >/dev/null
 	fi
 	# this host's name -> the leased address

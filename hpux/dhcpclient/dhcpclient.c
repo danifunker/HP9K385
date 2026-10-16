@@ -1,11 +1,19 @@
 /*
  * dhcpclient - minimal DHCP client for HP-UX 9 (no DHCP client ships with it).
  *
- *   dhcpclient MAC [HOSTNAME]        MAC as 080009385001 or 0x080009385001
+ *   dhcpclient [-z] MAC [HOSTNAME]        MAC as 080009385001 or 0x080009385001
  *
  * Broadcasts DISCOVER and REQUEST from port 68 with the broadcast flag set,
  * so the server's replies come back to 255.255.255.255:68 and the interface
- * only has to be up (any address).  On an ACK it prints one line:
+ * only has to be up (any address).
+ *
+ * -z first sets lan0's address to 0.0.0.0 (SIOCSIFADDR; ifconfig refuses
+ * it) and its broadcast address to 255.255.255.255, so the requests leave
+ * from 0.0.0.0 to the all-ones broadcast as DHCP clients' normally do.  HP-UX
+ * 9 routes even 255.255.255.255 (a stale default gateway swallows it; the
+ * caller removes default routes first) and rewrites it to the interface's
+ * broadcast address, 0.0.0.255 for address 0 unless set.  Without a lease
+ * the old address is put back; with one the caller sets the new address.  On an ACK it prints one line:
  *
  *   IP NETMASK ROUTER LEASE_SECONDS SERVER
  *
@@ -31,6 +39,8 @@
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <netinet/in.h>
+#include <sys/ioctl.h>
+#include <net/if.h>
 
 #define DISCOVER 1
 #define OFFER    2
@@ -43,6 +53,31 @@ static unsigned char pkt[576];
 static unsigned char rx[1600];
 static unsigned long xid;
 static char *hostname = 0;
+
+/* lan0's address: get, or set (a = host order) */
+static unsigned long getaddr(int s)
+{
+	struct ifreq r;
+	memset(&r, 0, sizeof r);
+	strcpy(r.ifr_name, "lan0");
+	if (ioctl(s, SIOCGIFADDR, (char *)&r) < 0) return 0;
+	return ntohl(((struct sockaddr_in *)&r.ifr_addr)->sin_addr.s_addr);
+}
+static int setreq(int s, int req, unsigned long a)
+{
+	struct ifreq r;
+	struct sockaddr_in *sin = (struct sockaddr_in *)&r.ifr_addr;
+	memset(&r, 0, sizeof r);
+	strcpy(r.ifr_name, "lan0");
+	sin->sin_family = AF_INET;
+	sin->sin_addr.s_addr = htonl(a);
+	return ioctl(s, req, (char *)&r);
+}
+static int setaddr(int s, unsigned long a)
+{
+	if (setreq(s, SIOCSIFADDR, a) < 0) return -1;
+	return a ? 0 : setreq(s, SIOCSIFBRDADDR, 0xFFFFFFFFUL);
+}
 
 static unsigned long yiaddr, mask, router, lease, server;
 static unsigned long dns[4];
@@ -171,12 +206,14 @@ int main(int argc, char **argv)
 	struct sockaddr_in me;
 	struct timeval now;
 	char *m;
-	int s, i, on = 1, len;
+	int s, i, on = 1, len, zero = 0;
+	unsigned long old = 0;
 	unsigned long offer_ip, offer_srv;
 	char a[20], b[20], c[20], d[20];
 
+	if (argc > 1 && strcmp(argv[1], "-z") == 0) { zero = 1; argv++; argc--; }
 	if (argc < 2) {
-		fprintf(stderr, "usage: dhcpclient MAC [HOSTNAME]\n");
+		fprintf(stderr, "usage: dhcpclient [-z] MAC [HOSTNAME]\n");
 		return 1;
 	}
 	m = argv[1];
@@ -202,11 +239,23 @@ int main(int argc, char **argv)
 	me.sin_addr.s_addr = htonl(INADDR_ANY);
 	if (bind(s, (struct sockaddr *)&me, sizeof me) < 0) { perror("dhcpclient: bind"); return 1; }
 
+	if (zero) {
+		old = getaddr(s);
+		if (setaddr(s, 0) < 0) { perror("dhcpclient: lan0 0.0.0.0"); zero = 0; }
+	}
 	len = build(DISCOVER, 0, 0);
-	if (exchange(s, len, OFFER) != OFFER) { fprintf(stderr, "dhcpclient: no offer\n"); return 1; }
+	if (exchange(s, len, OFFER) != OFFER) {
+		fprintf(stderr, "dhcpclient: no offer\n");
+		if (zero) setaddr(s, old);
+		return 1;
+	}
 	offer_ip = yiaddr; offer_srv = server;
 	len = build(REQUEST, offer_ip, offer_srv);
-	if (exchange(s, len, ACK) != ACK) { fprintf(stderr, "dhcpclient: no ack\n"); return 1; }
+	if (exchange(s, len, ACK) != ACK) {
+		fprintf(stderr, "dhcpclient: no ack\n");
+		if (zero) setaddr(s, old);
+		return 1;
+	}
 
 	if (!mask) mask = 0xFFFFFF00UL;
 	ipstr(yiaddr, a); ipstr(mask, b); ipstr(router, c); ipstr(server, d);
