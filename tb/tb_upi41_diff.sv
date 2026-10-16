@@ -43,7 +43,7 @@ upi41_ref ref_cpu (
 	.t0(t0), .t1(t1), .p1_rd(r_p1rd), .dbg_pc(r_pc), .dbg_dispatch(r_disp));
 
 upi41 dut (
-	.clk(clk), .reset(reset), .mc_tick(mc_tick),
+	.clk(clk), .reset(reset), .keep_dbb(1'b0), .mc_tick(mc_tick),
 	.rom_wr(rom_wr), .rom_addr(rom_addr), .rom_data(rom_data),
 	.host_cs(host_cs), .host_we(host_we), .host_a0(host_a0), .host_din(host_din),
 	.host_dout(d_dout), .p1_in(p1_in), .p1_out(d_p1), .p2_in(p2_in), .p2_out(d_p2),

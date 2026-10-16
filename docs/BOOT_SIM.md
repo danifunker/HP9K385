@@ -101,7 +101,7 @@ Modelled since the Phase 0 run above:
 
 **Bugs found while bringing it up:**
 
-- **The RESET instruction must not reset the DIO cards.** The boot ROM executes RESET about 0.1 s after power-up, while the 8042 is still configuring the HIL loop. A reset at that point warm-starts the 8042 with the loop configuration half done, so no keyboard is found.
+- **The RESET instruction must not reset the DIO cards.** The boot ROM executes RESET about 0.1 s after power-up, while the 8042 is still configuring the HIL loop. A reset at that point warm-starts the 8042 with the loop configuration half done, so no keyboard is found. *(Superseded 2026-10-15: that came from the HLE loop losing the 8042's first DHR frame. RESET now resets the 8042; see the PLAN_385 decision log.)*
 - **The Catseye's full-screen clears are slow** with the sim's 2-clock VRAM port: about 2.3M clocks for a 1280×1024 clear. The CPU waits behind them. Use `--loop-window 10000000` (or 0) so the stall detector doesn't fire.
 
 ## Phase 2 progress: booting from SCSI (2026-10-14, evening)

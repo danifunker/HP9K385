@@ -23,6 +23,9 @@ module upi41
 (
 	input             clk,
 	input             reset,
+	input             keep_dbb,         // with reset: a RESET-pin reset, which
+	                                    // leaves the host data bus buffer (and
+	                                    // RAM; else RAM is made to look fresh)
 	input             mc_tick,          // one pulse per machine cycle
 
 	input             rom_wr,
@@ -239,7 +242,16 @@ always @(*) begin
 	end
 	default: ;
 	endcase
-	if (reset) ram_we = 1'b0;                     // reset freezes the sequencer
+	if (reset) begin                              // reset freezes the sequencer
+		// The HP firmware warm-starts (no loop configuration, power-up report
+		// at once) when RAM holds its signature ($6F = $AA, $7F = $55), which
+		// it writes as soon as it cold-starts.  A real 8042's RAM survives a
+		// RESET-pin reset but comes up random at power-on; this block RAM
+		// survives a MiSTer reset too, so a full reset breaks the signature.
+		ram_we = !keep_dbb;
+		ram_wa = 8'h7F;
+		ram_wd = 8'h00;
+	end
 end
 
 //----------------------------------------------------------------------------
@@ -252,8 +264,12 @@ always @(posedge clk) begin
 		st <= S_FETCH;
 		pc <= 0; psw <= psw & 8'hC0; f1 <= 0;
 		tirq_en <= 0; xirq_en <= 0; timer_run <= 0; timer_flag <= 0; timer_ovf <= 0;
-		sts <= 0; flags_en <= 0; dma_en <= 0; irq_busy <= 0; irq_polled <= 0;
-		dbbo <= 8'hFF; p1_out <= 8'hFF; p2_out <= 8'hFF; debt <= 0; prescaler <= 0;
+		flags_en <= 0; dma_en <= 0; irq_busy <= 0; irq_polled <= 0;
+		p1_out <= 8'hFF; p2_out <= 8'hFF; debt <= 0; prescaler <= 0;
+		// Intel's list of what RESET initialises does not include the data
+		// bus buffer: a byte the host wrote (IBF) or has still to read (OBF)
+		// survives a RESET-pin reset.  Power-up (the system reset) clears it.
+		if (!keep_dbb) begin sts <= 0; dbbo <= 8'hFF; end
 	end
 	else begin
 		// ---- host side of the data bus buffer (any time) ----

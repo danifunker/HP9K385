@@ -224,6 +224,13 @@ assign cpu_reset_out = !nresetout;
 // warm-started with a half-done loop configuration and no keyboard.
 wire dio_reset = reset;
 
+// ...except the 8042's reset pin (hil_card rsto).  The boot ROM sends the
+// 8042 command $31 and executes RESET on every boot, cold or soft
+// (REQ_REBOOT, $1A4), then waits for the 8042's power-up report ($8E).
+// Without the reset an 8042 that has already configured the loop never sends
+// one, and a reboot from HP-UX or BSD shows "HP-HIL Failed".  The $31 has to
+// survive the reset (upi41 keep_dbb) or the loop comes up without a keyboard.
+
 wire        b_req, b_write;
 wire [31:2] b_addr;
 wire  [3:0] b_be;
@@ -437,6 +444,7 @@ wire        hpib_card_reset;
 hil_card hil (
 	.clk(clk),
 	.reset(dio_reset || hpib_card_reset),
+	.rsto(!nresetout),
 	.rom_wr(hil_rom_wr),
 	.rom_addr(hil_rom_addr),
 	.rom_data(hil_rom_data),

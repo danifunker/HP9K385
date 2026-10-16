@@ -46,6 +46,7 @@ quartus_build*.log
 verilator/obj_dir
 verilator/obj_dir_*/
 verilator/obj_fast/
+verilator/obj_*/
 verilator/*.png
 verilator/*.out
 verilator/*.err

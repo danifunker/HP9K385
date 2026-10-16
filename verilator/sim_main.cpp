@@ -16,6 +16,7 @@
 //   --disk0 FILE / --disk1 FILE   SCSI disk images (IDs 0 / 1); writes go back to the file
 //   --cd FILE          CD-ROM image on ID 2: flat 2048-byte sectors (an .iso), read-only
 //   --key CYC:CODE     at clock CYC send HIL keycode CODE (hex; bit 0 = release); repeatable
+//   --reset CYC        at clock CYC a 64-clock system reset (the OSD's Reset); repeatable
 //   --mem-model M      main memory timing: ideal (default, MEM_LATENCY clocks a beat)
 //                      or sdram (the measured sdram_beat32 timing, see mem_service)
 //   --vram-latency N   98550 frame-buffer beat latency in clocks (default 2)
@@ -302,6 +303,7 @@ int main(int argc, char **argv) {
 	int64_t stop_pc = -1;
 	std::vector<std::pair<uint32_t, uint16_t>> patches;
 	std::vector<std::pair<uint64_t, uint8_t>> keys;
+	std::vector<uint64_t> resets;
 
 	for (int i = 1; i < argc; i++) {
 		std::string a = argv[i];
@@ -336,6 +338,7 @@ int main(int argc, char **argv) {
 		else if (a == "--status") status_every = strtoull(next(), nullptr, 0);
 		else if (a == "--snap") snap_path = next();
 		else if (a == "--snap-every") snap_every = strtoull(next(), nullptr, 0);
+		else if (a == "--reset") resets.push_back(strtoull(next(), nullptr, 0));
 		else if (a == "--key") {
 			const char *v = next();
 			const char *c = strchr(v, ':');
@@ -425,6 +428,10 @@ int main(int argc, char **argv) {
 			top->hil_rom_wr = 1; top->hil_rom_addr = cycle; top->hil_rom_data = hilrom[cycle];
 		} else top->hil_rom_wr = 0;
 		if (cycle == reset_clks) top->reset = 0;
+		for (auto r : resets) {
+			if (cycle == r) { top->reset = 1; printf("[RESET] @%llu\n", (unsigned long long)cycle); }
+			if (cycle == r + 64) top->reset = 0;
+		}
 		if (cycle == reset_clks + 16) top->rtc_set[2] = 1;     // bit 64: "RTC updated"
 		// mount the images: a one-clock pulse per disk with its size
 		top->img_mounted = 0;

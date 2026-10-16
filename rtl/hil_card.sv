@@ -33,6 +33,7 @@ module hil_card
 (
 	input             clk,
 	input             reset,          // includes the DIO reset
+	input             rsto,           // the CPU's RESET instruction: resets the 8042 only
 
 	input             rom_wr,
 	input      [10:0] rom_addr,
@@ -90,7 +91,8 @@ msm58321 rtc (
 
 upi41 cpu (
 	.clk(clk),
-	.reset(reset),
+	.reset(reset || rsto),
+	.keep_dbb(!reset),
 	.mc_tick(mc_tick),
 	.rom_wr(rom_wr),
 	.rom_addr(rom_addr),
@@ -151,7 +153,10 @@ assign mlc_dout = mlc_reg == 2'd0 ? (f_cnt != 0 ? fifo[f_rd][7:0] : 8'h00) :
 // ---- the loop: MLC -> keyboard -> mouse -> MLC ----
 // A frame visits the keyboard; if the keyboard passes it on (pass-through,
 // or DHR) it visits the mouse; whichever device stops it returns it to the
-// MLC.  A frame passed on by the last device is lost, as in MAME.
+// MLC, and so does the loop when the last device passes it on.  (MAME loses
+// that frame.  The 8042's first frame after power-up is a DHR; lost, it
+// waits ~0.2 s for it and only configures the loop after the boot ROM's
+// RESET, which then warm-starts it with no devices: see hp385_top.)
 wire [11:0] wr_frame = {w1, p1_out};
 
 localparam L_IDLE = 2'd0, L_KBD = 2'd1, L_MOUSE = 2'd2, L_ECHO = 2'd3;
@@ -217,7 +222,7 @@ always @(posedge clk) begin
 		end
 		L_MOUSE: if (mouse_done) begin
 			l_frame <= mouse_frame;
-			lst <= mouse_pass ? L_IDLE : L_ECHO;
+			lst <= L_ECHO;
 		end
 		L_ECHO: lst <= L_IDLE;
 		default: ;
