@@ -37,7 +37,10 @@
 //  N * ceil(CLK_HZ / 8 MHz); the selection time-out runs on an 8 MHz tick
 //  derived from CLK_HZ: ((TC & 0xFFFF00) + 15) * 2 chip clocks.  A bus
 //  that stays free for 10 ms while connected disconnects the SPC (MAME's
-//  bus-free timer).
+//  bus-free timer).  Exception: a hardware (DMA) transfer in a data phase
+//  handshakes with no added delay (`fast`); the chip delays held DATA IN
+//  to ~470 KB/s and DATA OUT to ~1 MB/s.  Program transfers and the
+//  command / status / message phases keep them.
 //
 //  Ports:
 //    cs/we/rs/din/dout  one register access per cs pulse; dout is
@@ -161,6 +164,9 @@ wire [8:0] cv = diag ? {1'b0, dctl[7], dctl[6] | sdgc[6], dctl[5] | sdgc[7], dct
                      : bus_ctl;
 wire [7:0] bus_data = scsi_data_i;
 wire [2:0] phase    = cv[2:0];               // {MSG, C/D, I/O}
+// a hardware (DMA) transfer in a data phase handshakes without MAME's chip
+// delays: they cost ~70 clocks a byte (~470 KB/s) on DATA IN
+wire       fast     = dma_xfer && (phase[2:1] == 2'b00);
 
 assign {scsi_rst_o, scsi_atn_o, scsi_ack_o, scsi_req_o, scsi_sel_o,
         scsi_bsy_o, scsi_msg_o, scsi_cd_o, scsi_io_o} = bctl;
@@ -404,7 +410,7 @@ always @(*) begin
 		else if (tc != 24'd0 && !ffull) begin
 			push   = 1'b1;
 			push_d = bus_data;
-			go(S_X_ACK, D10, 1'b0);
+			go(S_X_ACK, fast ? 10'd0 : D10, 1'b0);
 		end
 
 	S_X_SEND:
@@ -412,7 +418,7 @@ always @(*) begin
 			odata_n    = head;
 			pop        = 1'b1;
 			inflight_n = 1'b1;
-			go(S_X_ACK, D2, 1'b0);
+			go(S_X_ACK, fast ? 10'd0 : D2, 1'b0);
 		end
 		else if (tc == 24'd0 && scmd[0]) begin
 			odata_n = temp;
@@ -422,18 +428,18 @@ always @(*) begin
 	S_X_ACK: begin
 		if (!scmd[0] && !cv[0]) temp_n = bus_data;
 		set_ctrl(L_ACK, L_ACK);
-		go(S_X_WNREQ, D1, 1'b0);
+		go(S_X_WNREQ, fast ? 10'd0 : D1, 1'b0);
 	end
 
 	S_X_WNREQ:
-		if (!cv[5]) go(S_X_NACK, D1, 1'b0);
+		if (!cv[5]) go(S_X_NACK, fast ? 10'd0 : D1, 1'b0);
 
 	S_X_NACK: begin
 		term       = (tc == 24'd0) && scmd[0];
 		tc_dec     = term ? tc : tc - 24'd1;
 		tc_n       = tc_dec;
 		inflight_n = 1'b0;
-		go((tc_dec != 24'd0) ? S_X_WREQ : S_X_FIFO, D1, 1'b0);
+		go((tc_dec != 24'd0) ? S_X_WREQ : S_X_FIFO, fast ? 10'd0 : D1, 1'b0);
 		if (tc_dec == 24'd0 && phase == 3'b110 && send_atn)
 			set_ctrl(9'd0, L_ATN | L_ACK);   // last MESSAGE OUT byte: drop ATN
 		else if (tc_dec != 24'd0 || phase != 3'b111)

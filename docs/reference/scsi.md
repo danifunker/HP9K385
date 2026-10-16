@@ -113,7 +113,7 @@ The selection time-out is `((TC & 0xFFFF00) + 15) * 2` chip clocks. They are cou
 
 The bus-free disconnect timer is 10 ms, which is `CLK_HZ / 100` cycles.
 
-MAME's 10-clock delay between receiving a byte and sending ACK limits DATA IN to about 2.3 µs per byte at 33 MHz, which is about 430 KB/s. It can be shortened if speed matters. Real parts do about 1.5 MB/s in asynchronous mode.
+MAME's 10-clock delay between receiving a byte and sending ACK limited DATA IN to about 2.1 µs per byte at 33 MHz (about 470 KB/s), and DATA OUT ran at about 1 MB/s. Real parts do about 1.5 MB/s in asynchronous mode. So a hardware (DMA) transfer in a data phase now skips every handshake delay (`fast` in the RTL; see Deviations). `tb_scsi_dma` times a 16-block DMA WRITE(10) and READ(10): 260k / 588k clocks before, about 96k each after (~6k clocks, ~180 µs, a block). Program transfers and the command, status and message phases keep MAME's delays, so the PIO paths the drivers were checked against are unchanged.
 
 ### DMA
 
@@ -150,6 +150,7 @@ HP-UX 9 ends its SCSI bus reset with SCMD = 0x10 (RST), SCTL = 0xC0, SCMD = 0, s
 - INTS write-to-clear only clears bits that were set before the write.
 - `dreq` for DATA OUT stops once TC bytes are queued. MAME only drops it when the FIFO is full and relies on the DMA count.
 - Reset-and-disable also clears the data lines. MAME leaves them.
+- DMA data phases handshake with no chip-clock delays (see "Timeouts and delays"). On HP-UX 9 the old delays held raw-disk reads to ~375 KB/s with 64 KB transfers.
 - MAME's own quirk is kept: a phase mismatch clears SPC_BUSY but not XFER_IN_PROGRESS.
 - SCTL[7] (reset & disable) releases RST and clears SCMD and INTS. MAME leaves RST on the bus until the next SCMD write with SCTL[7] clear.
 - A received byte goes into the FIFO together with ACK, after MAME's 10-clock delay. MAME pushes it when it sees REQ, 10 clocks before ACK. In that window, software that has already read the last byte still sees the target's REQ for it. NetBSD's `spc_datain_pio` returns as soon as it has its n bytes. `spc_intr` then finds REQ up in DATA IN and starts a zero-length transfer in the middle of the handshake, which hangs the bus. `tb_scsi_dma` catches this with a fast CPU.
