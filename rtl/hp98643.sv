@@ -102,10 +102,9 @@ wire [3:0] nov_n    = reg_off[5:2];
 wire [7:0] nov_byte = nov_n == 4'd15 ? NOV_SUM : mac_byte(nov_n);
 wire [3:0] nov_nib  = reg_off[1] ? nov_byte[3:0] : nov_byte[7:4];
 
-// ---- card RAM: true dual port, A = host, B = LANCE ----
-reg  [7:0] ram_hi [0:8191];
-reg  [7:0] ram_lo [0:8191];
-reg [15:0] qa, qb;
+// ---- card RAM: true dual port, A = host, B = LANCE (rtl/wombat/dpram.v:
+// an altsyncram, two 8-bit halves for the byte lanes) ----
+wire [15:0] qa, qb;
 wire [12:0] a_addr = reg_off[13:1];
 wire        a_we   = reg_cs && reg_we && is_ram;
 wire [12:0] b_addr;
@@ -113,22 +112,16 @@ wire        b_we;
 wire  [1:0] b_be;
 wire [15:0] b_wdata;
 
-always @(posedge clk) begin
-	if (a_we && reg_be[1]) ram_hi[a_addr] <= reg_din[15:8];
-	qa[15:8] <= ram_hi[a_addr];
-end
-always @(posedge clk) begin
-	if (a_we && reg_be[0]) ram_lo[a_addr] <= reg_din[7:0];
-	qa[7:0] <= ram_lo[a_addr];
-end
-always @(posedge clk) begin
-	if (b_we && b_be[1]) ram_hi[b_addr] <= b_wdata[15:8];
-	qb[15:8] <= ram_hi[b_addr];
-end
-always @(posedge clk) begin
-	if (b_we && b_be[0]) ram_lo[b_addr] <= b_wdata[7:0];
-	qb[7:0] <= ram_lo[b_addr];
-end
+dpram #(.AW(13), .DW(8)) ram_hi (
+	.clock(clk),
+	.address_a(a_addr), .data_a(reg_din[15:8]), .wren_a(a_we && reg_be[1]), .q_a(qa[15:8]),
+	.address_b(b_addr), .data_b(b_wdata[15:8]), .wren_b(b_we && b_be[1]),   .q_b(qb[15:8])
+);
+dpram #(.AW(13), .DW(8)) ram_lo (
+	.clock(clk),
+	.address_a(a_addr), .data_a(reg_din[7:0]),  .wren_a(a_we && reg_be[0]), .q_a(qa[7:0]),
+	.address_b(b_addr), .data_b(b_wdata[7:0]),  .wren_b(b_we && b_be[0]),   .q_b(qb[7:0])
+);
 
 // a read is ready once its address has been on port A for a clock with no
 // write in between
