@@ -28,17 +28,22 @@
 //  no image every command but INQUIRY and REQUEST SENSE gets CHECK
 //  CONDITION, NOT READY / medium not present.
 //
-//  Block side (hps_io, WIDE=1, BLKSZ=2, parent ties sd_blk_cnt = 0), one
-//  slot per unit, packed with unit 0 in the low bits: one 512-byte block
-//  per request.  sd_lba is set and the unit's sd_rd / sd_wr raised; the
-//  request drops when that unit's sd_ack rises, the block is done when it
-//  falls.  Words are little-endian: [7:0] is the even (first) byte.  Reads
-//  land through sd_buff_wr at sd_buff_addr; for writes sd_buff_din is the
-//  buffer word at sd_buff_addr registered one clock later (hps_io samples
-//  it many clocks after it moves the address).  One block buffer, no
-//  read-ahead: every block costs one HPS round trip.  A new request waits
-//  until no unit has one outstanding, so the shared sd_lba (the same on
-//  every slot) never moves under a request and the one buffer serves all.
+//  Block side (hps_io, WIDE=1, BLKSZ=2), one slot per unit, packed with
+//  unit 0 in the low bits.  A disk unit moves up to MAXB 512-byte blocks
+//  per request (sd_blk_cnt = blocks - 1), a CD-ROM unit one (the Main
+//  fork's CD translation serves 512-byte requests).  sd_lba / sd_blk_cnt
+//  are set and the unit's sd_rd / sd_wr raised; the request drops when
+//  that unit's sd_ack rises, the transfer is done when it falls.  Words
+//  are little-endian: [7:0] is the even (first) byte, and sd_buff_addr
+//  counts words across the blocks of one request.  Reads land through
+//  sd_buff_wr at sd_buff_addr; for writes sd_buff_din is the buffer word
+//  at sd_buff_addr registered one clock later (hps_io samples it many
+//  clocks after it moves the address).  One buffer of MAXB blocks, no
+//  read-ahead: a READ / WRITE costs one HPS round trip per MAXB blocks
+//  (each also one O_SYNC write on Main's side, unless its write buffer
+//  takes it).  A new request waits until no unit has one outstanding, so
+//  the shared sd_lba (the same on every slot) never moves under a request
+//  and the one buffer serves all.
 //
 //  Image: img_mounted[u] (a pulse) latches img_size / img_readonly for
 //  unit u.  The mount state is not cleared by `reset` (the HPS does not
@@ -59,7 +64,8 @@
 module scsi_target
 #(
 	parameter             UNITS = 3,             // IDs 0 .. UNITS-1 (1..8)
-	parameter [UNITS-1:0] CDROM = {UNITS{1'b0}}  // bit u: unit u is a CD-ROM
+	parameter [UNITS-1:0] CDROM = {UNITS{1'b0}}, // bit u: unit u is a CD-ROM
+	parameter             MAXB  = 32             // disk blocks per HPS request (1..32: hps_io's 16 KB)
 )
 (
 	input             clk,
@@ -77,10 +83,11 @@ module scsi_target
 	input                    img_readonly,
 
 	output    [32*UNITS-1:0] sd_lba,
+	output     [6*UNITS-1:0] sd_blk_cnt,
 	output reg   [UNITS-1:0] sd_rd,
 	output reg   [UNITS-1:0] sd_wr,
 	input        [UNITS-1:0] sd_ack,
-	input              [7:0] sd_buff_addr,
+	input             [12:0] sd_buff_addr,
 	input             [15:0] sd_buff_dout,
 	input                    sd_buff_wr,
 	output    [16*UNITS-1:0] sd_buff_din
@@ -206,6 +213,7 @@ reg  [7:0] ms_base, ms_total;
 reg [15:0] xlen, pos;
 reg [31:0] lba;
 reg [31:0] req_lba;                       // sd_lba, the same on every slot
+reg  [5:0] req_cnt;                       // sd_blk_cnt, the same on every slot
 reg [18:0] nblk;                          // 512-byte host blocks left
 reg        disk_xfer;                     // DATA OUT goes to the disk (else dropped)
 reg        ack_seen;
@@ -214,7 +222,8 @@ reg  [UNITS-1:0] blk2k = {UNITS{1'b0}};   // CD-ROM: logical blocks are 2048 byt
 reg  [7:0] msel_bdl;                      // MODE SELECT: block descriptor length
 reg [23:0] msel_bl;                       // MODE SELECT: block length
 
-assign sd_lba = {UNITS{req_lba}};
+assign sd_lba     = {UNITS{req_lba}};
+assign sd_blk_cnt = {UNITS{req_cnt}};
 
 // ---- the connected unit ----
 wire        is_cd   = CDROM[cur];
@@ -226,6 +235,12 @@ wire        ack     = sd_ack[cur];
 wire [3:0]  cur_key = sense_key[cur];
 wire [7:0]  cur_asc = sense_asc[cur];
 wire        sd_busy = |{sd_rd, sd_wr, sd_ack};    // a request outstanding on any unit
+
+// blocks in the next HPS request, and its bytes in the buffer
+localparam [18:0] MAXB19 = MAXB;
+wire  [5:0] chunk   = is_cd ? 6'd1 : (nblk >= MAXB19) ? MAXB19[5:0] : nblk[5:0];
+wire [15:0] chunk_b = {1'b0, chunk, 9'd0};
+wire [18:0] chunk19 = {13'd0, chunk};
 
 // selection: the lowest of our ID bits on the bus
 wire        sel_hit = (scsi_data_i & IDS) != 8'h00;
@@ -407,19 +422,20 @@ always @(*) begin
 	endcase
 end
 
-// ---- sector buffer, shared: even / odd byte halves, one write and one
-// read port each ----
-reg  [7:0] ram_e [0:255];
-reg  [7:0] ram_o [0:255];
+// ---- block buffer, shared: even / odd byte halves, one write and one
+// read port each; word address {block in the request, word in the block} ----
+localparam BW = (MAXB > 16) ? 13 : (MAXB > 8) ? 12 : (MAXB > 4) ? 11 : (MAXB > 2) ? 10 : (MAXB > 1) ? 9 : 8;
+reg  [7:0] ram_e [0:MAXB*256-1];
+reg  [7:0] ram_o [0:MAXB*256-1];
 reg  [7:0] q_e, q_o;
 wire       host_we = ack && sd_buff_wr && (st == S_RD_WAIT);
 wire       scsi_we = (st == S_DOUT_B) && disk_xfer;
-wire [7:0] waddr   = host_we ? sd_buff_addr : pos[8:1];
+wire [BW-1:0] waddr = host_we ? sd_buff_addr[BW-1:0] : pos[BW:1];
 wire       we_e    = host_we || (scsi_we && !pos[0]);
 wire       we_o    = host_we || (scsi_we &&  pos[0]);
 wire [7:0] wd_e    = host_we ? sd_buff_dout[7:0]  : rxd;
 wire [7:0] wd_o    = host_we ? sd_buff_dout[15:8] : rxd;
-wire [7:0] raddr   = ack ? sd_buff_addr : pos[8:1];
+wire [BW-1:0] raddr = ack ? sd_buff_addr[BW-1:0] : pos[BW:1];
 always @(posedge clk) begin
 	if (we_e) ram_e[waddr] <= wd_e;
 	if (we_o) ram_o[waddr] <= wd_o;
@@ -448,7 +464,7 @@ always @(posedge clk) begin
 		st <= S_IDLE; ret <= S_IDLE;
 		ident <= 1'b0;
 		if (reset) begin
-			sd_rd <= {UNITS{1'b0}}; sd_wr <= {UNITS{1'b0}}; req_lba <= 32'd0;
+			sd_rd <= {UNITS{1'b0}}; sd_wr <= {UNITS{1'b0}}; req_lba <= 32'd0; req_cnt <= 6'd0;
 			for (ui = 0; ui < UNITS; ui = ui + 1) begin
 				sense_key[ui] <= SK_NONE; sense_asc[ui] <= ASC_NONE;
 			end
@@ -626,10 +642,11 @@ always @(posedge clk) begin
 				st     <= S_TXB;
 			end
 
-		// ---- DATA IN from the disk, one block at a time ----
+		// ---- DATA IN from the disk, `chunk` blocks per request ----
 		S_RD_REQ:
 			if (!sd_busy) begin
 				req_lba    <= lba;
+				req_cnt    <= chunk - 6'd1;
 				sd_rd[cur] <= 1'b1;
 				ack_seen   <= 1'b0;
 				st         <= S_RD_WAIT;
@@ -643,11 +660,11 @@ always @(posedge clk) begin
 			end
 		end
 
-		S_RD_SEND:                             // raddr = pos[8:1] this cycle
-			if (pos == 16'd512) begin
-				lba  <= lba + 32'd1;
-				nblk <= nblk - 19'd1;
-				st   <= (nblk == 19'd1) ? S_STAT : S_RD_REQ;
+		S_RD_SEND:                             // raddr = pos[BW:1] this cycle
+			if (pos == chunk_b) begin
+				lba  <= lba + {26'd0, chunk};
+				nblk <= nblk - chunk19;
+				st   <= (nblk == chunk19) ? S_STAT : S_RD_REQ;
 			end
 			else st <= S_RD_FETCH;
 
@@ -660,7 +677,7 @@ always @(posedge clk) begin
 
 		// ---- DATA OUT: to the buffer (disk) or dropped ----
 		S_DOUT:
-			if (pos == (disk_xfer ? 16'd512 : xlen)) begin
+			if (pos == (disk_xfer ? chunk_b : xlen)) begin
 				st <= disk_xfer ? S_WR_REQ : S_STAT;
 				// CD-ROM MODE SELECT: the block descriptor sets the block length
 				if (is_cd && !disk_xfer && op == 8'h15 && xlen >= 16'd12 && msel_bdl >= 8'd8) begin
@@ -684,6 +701,7 @@ always @(posedge clk) begin
 		S_WR_REQ:
 			if (!sd_busy) begin
 				req_lba    <= lba;
+				req_cnt    <= chunk - 6'd1;
 				sd_wr[cur] <= 1'b1;
 				ack_seen   <= 1'b0;
 				st         <= S_WR_WAIT;
@@ -692,10 +710,10 @@ always @(posedge clk) begin
 		S_WR_WAIT: begin
 			if (ack) ack_seen <= 1'b1;
 			if (ack_seen && !ack) begin
-				lba  <= lba + 32'd1;
-				nblk <= nblk - 19'd1;
+				lba  <= lba + {26'd0, chunk};
+				nblk <= nblk - chunk19;
 				pos  <= 16'd0;
-				st   <= (nblk == 19'd1) ? S_STAT : S_DOUT;
+				st   <= (nblk == chunk19) ? S_STAT : S_DOUT;
 			end
 		end
 

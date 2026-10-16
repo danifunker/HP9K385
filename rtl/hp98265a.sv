@@ -46,10 +46,11 @@ module hp98265a
 	input      [63:0] img_size,           // shared (sampled on each one's mount pulse)
 	input             img_readonly,
 	output     [95:0] sd_lba,             // {CD, disk 1, disk 0}
+	output     [17:0] sd_blk_cnt,         // {CD, disk 1, disk 0}: blocks - 1
 	output      [2:0] sd_rd,
 	output      [2:0] sd_wr,
 	input       [2:0] sd_ack,
-	input       [7:0] sd_buff_addr,
+	input      [12:0] sd_buff_addr,
 	input      [15:0] sd_buff_dout,
 	input             sd_buff_wr,
 	output     [47:0] sd_buff_din         // {CD, disk 1, disk 0}
@@ -111,6 +112,7 @@ scsi_target #(.UNITS(3), .CDROM(3'b100)) targets (
 	.img_size(img_size),
 	.img_readonly(img_readonly),
 	.sd_lba(sd_lba),
+	.sd_blk_cnt(sd_blk_cnt),
 	.sd_rd(sd_rd),
 	.sd_wr(sd_wr),
 	.sd_ack(sd_ack),

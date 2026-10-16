@@ -170,7 +170,7 @@ These are the same as in MAME:
 
 ### One engine, several units
 
-Only one target can be connected at a time, so one state machine, CDB, set of counters and one 512-byte sector buffer serve every unit. The engine answers a selection carrying the ID bit of any of its units (an ID without an image answers too, and gets NOT READY; an ID at or above `UNITS` does not answer, so the initiator sees a selection time-out). The unit that won the selection is `cur`, and everything below applies to it, as if each unit were its own target.
+Only one target can be connected at a time, so one state machine, CDB, set of counters and one block buffer (`MAXB` blocks, 16 KB) serve every unit. The engine answers a selection carrying the ID bit of any of its units (an ID without an image answers too, and gets NOT READY; an ID at or above `UNITS` does not answer, so the initiator sees a selection time-out). The unit that won the selection is `cur`, and everything below applies to it, as if each unit were its own target.
 
 Kept per unit, because it outlives a connection:
 - the image: mounted, read-only, size in blocks (latched on that unit's `img_mounted` bit);
@@ -254,15 +254,15 @@ Every command other than REQUEST SENSE first clears the stored sense. There is n
 
 ### Block interface (hps_io, WIDE=1, BLKSZ=2)
 
-Each request moves one 512-byte block. The parent ties `sd_blk_cnt` to 0, uses `sd_buff_addr[7:0]` (the word index, 0-255) and gives the disk its own `img_mounted` bit.
+A disk unit's request moves up to `MAXB` (32) 512-byte blocks: `sd_blk_cnt` is the block count minus 1, and `sd_buff_addr[12:0]` is the word index across the whole request (0 to 256 × blocks − 1). A CD-ROM unit always asks for one block, because Main's CD translation (`support/hp9k`) serves 512-byte requests. Each unit has its own `img_mounted` bit. hps_io allows at most 16 KB a request, which is 32 blocks.
 
 The handshake matches `sys/hps_io.sv`:
-- The disk sets `sd_lba` and raises `sd_rd` or `sd_wr`. Both stay stable until `sd_ack` rises, and the request drops in the cycle after that. hps_io asserts `sd_ack` together with `sd_buff_addr = 0` (command 0x17 or 0x18), and the block is finished when `sd_ack` falls. The disk waits for that fall before it uses the block or issues the next request.
+- The disk sets `sd_lba` and `sd_blk_cnt` and raises `sd_rd` or `sd_wr`. Both stay stable until `sd_ack` rises, and the request drops in the cycle after that. hps_io asserts `sd_ack` together with `sd_buff_addr = 0` (command 0x17 or 0x18), and the block is finished when `sd_ack` falls. The disk waits for that fall before it uses the block or issues the next request.
 - **Read (0x17):** each word arrives on `sd_buff_dout` with a one-cycle `sd_buff_wr` pulse at `sd_buff_addr`. hps_io increments the address two cycles later.
 - **Write (0x18):** `sd_buff_din` is the buffer word at `sd_buff_addr`, registered, so it is valid one clock after the address changes. hps_io samples `sd_buff_din` at an `io_strobe`, many `clk_sys` cycles after it last moved the address. The MacQuadra800 core relies on the same thing.
 - **Byte order:** little-endian. `[7:0]` is the even byte (the first on disk) and `[15:8]` is the odd byte. This is how the real HPS packs WIDE words. MacQuadra800's `ncr53c96.sv` documents it and found it on hardware. Note that its Verilator `sim_blkdevice.cpp` packs big-endian, so do not reuse that helper unchanged.
 
-The buffer is two 256 × 8 simple dual-port RAMs (even and odd bytes), which map to M10K. There is no read-ahead and no write-behind, so every block costs one HPS round trip of about 100 µs. If throughput matters, a cache like MacQuadra800's `scsi_cache.sv` can go between the disk and hps_io.
+The buffer is two `MAXB` × 256 × 8 simple dual-port RAMs (even and odd bytes), 16 KB in all, which map to M10K. A READ or WRITE is cut into requests of up to 32 blocks. The SCSI side stops between requests: it fills the buffer and then writes it, or fetches it and then sends it. So an 8 KB HP-UX file-system block costs one HPS round trip instead of 16. There is no read-ahead across commands and no write-behind in the core. On the Main side, `support/hp9k/hp9k_disk.cpp` buffers writes, so a write request does not wait for its own `O_SYNC` SD write. Images are opened `O_SYNC`, and on the board that wait was about 8 ms a block, which held HP-UX to about 60 KB/s. A cache like MacQuadra800's `scsi_cache.sv` would add read-ahead across commands.
 
 ### Image and reset
 

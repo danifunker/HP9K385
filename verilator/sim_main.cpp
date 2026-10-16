@@ -192,9 +192,9 @@ struct Disk {
 static Disk disks[3];
 static int blk_disk = -1;            // disk being served
 static int blk_phase = 0;            // 0 idle, 1 latency, 2 streaming, 3 done
-static int blk_wait = 0, blk_word = 0;
+static int blk_wait = 0, blk_word = 0, blk_words = 256;
 static bool blk_write = false;
-static uint8_t blk_buf[512];
+static uint8_t blk_buf[16384];       // up to 32 blocks per request (sd_blk_cnt)
 
 static void disk_service() {
 	top->sd_buff_wr = 0;
@@ -203,13 +203,14 @@ static void disk_service() {
 		for (int d = 0; d < 3; d++) {
 			bool rd = (top->sd_rd >> d) & 1, wr = (top->sd_wr >> d) & 1;
 			if (!rd && !wr) continue;
-			blk_disk = d; blk_write = wr; blk_wait = 64; blk_phase = 1; blk_word = 0;
+			int n = ((top->sd_blk_cnt >> (6 * d)) & 0x3F) + 1;
+			blk_disk = d; blk_write = wr; blk_wait = 64; blk_phase = 1; blk_word = 0; blk_words = 256 * n;
 			uint32_t lba = top->sd_lba[d];
-			printf("[DISK%d] %s lba %u @%llu\n", d, wr ? "write" : "read", lba, (unsigned long long)cycle);
-			memset(blk_buf, 0, 512);
+			printf("[DISK%d] %s lba %u x%d @%llu\n", d, wr ? "write" : "read", lba, n, (unsigned long long)cycle);
+			memset(blk_buf, 0, 512 * n);
 			if (disks[d].f) {
 				fseeko(disks[d].f, (off_t)lba * 512, SEEK_SET);
-				if (!wr && fread(blk_buf, 1, 512, disks[d].f) != 512) { /* past the end: zeros */ }
+				if (!wr && fread(blk_buf, 1, 512 * n, disks[d].f) != (size_t)(512 * n)) { /* past the end: zeros */ }
 				if (wr) fseeko(disks[d].f, (off_t)lba * 512, SEEK_SET);
 			}
 			break;
@@ -223,15 +224,15 @@ static void disk_service() {
 			top->sd_buff_addr = blk_word;
 			top->sd_buff_dout = blk_buf[2 * blk_word] | (blk_buf[2 * blk_word + 1] << 8);
 			top->sd_buff_wr = 1;
-			if (++blk_word == 256) blk_phase = 3;
+			if (++blk_word == blk_words) blk_phase = 3;
 		} else {
 			// address now, sample the word on the next call
 			if (blk_word > 0) {
 				uint16_t w = (uint16_t)(top->sd_buff_din >> (16 * blk_disk));
 				blk_buf[2 * (blk_word - 1)] = w & 0xFF; blk_buf[2 * (blk_word - 1) + 1] = w >> 8;
 			}
-			if (blk_word == 256) {
-				if (disks[blk_disk].f) { fwrite(blk_buf, 1, 512, disks[blk_disk].f); fflush(disks[blk_disk].f); }
+			if (blk_word == blk_words) {
+				if (disks[blk_disk].f) { fwrite(blk_buf, 1, 2 * blk_words, disks[blk_disk].f); fflush(disks[blk_disk].f); }
 				blk_phase = 3;
 			} else top->sd_buff_addr = blk_word;
 			blk_word++;

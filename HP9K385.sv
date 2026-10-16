@@ -103,16 +103,21 @@ wire  [2:0] img_mounted;
 wire        img_readonly;
 wire [63:0] img_size;
 wire [31:0] sd_lba[3];
+wire  [5:0] sd_blk_cnt[3];
 wire  [2:0] sd_rd, sd_wr, sd_ack;
-wire  [7:0] sd_buff_addr;
+wire [12:0] sd_buff_addr;
 wire [15:0] sd_buff_dout;
 wire [15:0] sd_buff_din[3];
 wire        sd_buff_wr;
 wire [95:0] m_sd_lba;
+wire [17:0] m_sd_blk_cnt;
 wire [47:0] m_sd_buff_din;
 assign sd_lba[0] = m_sd_lba[31:0];
 assign sd_lba[1] = m_sd_lba[63:32];
 assign sd_lba[2] = m_sd_lba[95:64];
+assign sd_blk_cnt[0] = m_sd_blk_cnt[5:0];
+assign sd_blk_cnt[1] = m_sd_blk_cnt[11:6];
+assign sd_blk_cnt[2] = m_sd_blk_cnt[17:12];
 assign sd_buff_din[0] = m_sd_buff_din[15:0];
 assign sd_buff_din[1] = m_sd_buff_din[31:16];
 assign sd_buff_din[2] = m_sd_buff_din[47:32];
@@ -143,7 +148,7 @@ hps_io #(.CONF_STR(CONF_STR), .WIDE(1), .VDNUM(3), .BLKSZ(2)) hps_io
 	.img_readonly(img_readonly),
 	.img_size(img_size),
 	.sd_lba(sd_lba),
-	.sd_blk_cnt('{6'd0, 6'd0, 6'd0}),
+	.sd_blk_cnt(sd_blk_cnt),
 	.sd_rd(sd_rd),
 	.sd_wr(sd_wr),
 	.sd_ack(sd_ack),
@@ -302,6 +307,7 @@ hp385_top machine
 	.img_size(img_size),
 	.img_readonly(img_readonly),
 	.sd_lba(m_sd_lba),
+	.sd_blk_cnt(m_sd_blk_cnt),
 	.sd_rd(sd_rd),
 	.sd_wr(sd_wr),
 	.sd_ack(sd_ack),

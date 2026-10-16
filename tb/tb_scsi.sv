@@ -85,7 +85,8 @@ reg  [63:0] img_size = 0;                   // shared, as in hps_io
 reg         img_ro = 0;
 wire [127:0] t_lba;
 wire  [3:0] t_rd, t_wr, t_ack;
-wire  [7:0] t_baddr;
+wire [23:0] t_cnt;
+wire [12:0] t_baddr;
 wire [15:0] t_bdout;
 wire        t_bwr;
 wire [63:0] t_bdin;
@@ -101,7 +102,7 @@ scsi_target #(.UNITS(4), .CDROM(4'b0100)) tgt
 	.scsi_bsy_i(bc[3]), .scsi_sel_i(bc[4]), .scsi_atn_i(bc[7]), .scsi_ack_i(bc[6]), .scsi_rst_i(bc[8]),
 	.scsi_req_i(bc[5]), .scsi_msg_i(bc[2]), .scsi_cd_i(bc[1]), .scsi_io_i(bc[0]),
 	.img_mounted(img_mounted), .img_size(img_size), .img_readonly(img_ro),
-	.sd_lba(t_lba), .sd_rd(t_rd), .sd_wr(t_wr), .sd_ack(t_ack),
+	.sd_lba(t_lba), .sd_blk_cnt(t_cnt), .sd_rd(t_rd), .sd_wr(t_wr), .sd_ack(t_ack),
 	.sd_buff_addr(t_baddr), .sd_buff_dout(t_bdout), .sd_buff_wr(t_bwr),
 	.sd_buff_din(t_bdin)
 );
@@ -115,7 +116,7 @@ endtask
 wire [31:0] sd_lba0 = t_lba[31:0];
 wire        sd_rd0 = t_rd[0], sd_wr0 = t_wr[0];
 reg         sd_ack0 = 0;
-reg   [7:0] sd_buff_addr0 = 0;
+reg  [12:0] sd_buff_addr0 = 0;
 reg  [15:0] sd_buff_dout0 = 0;
 reg         sd_buff_wr0 = 0;
 wire [15:0] sd_buff_din0 = t_bdin[15:0];
@@ -123,32 +124,32 @@ wire [15:0] sd_buff_din0 = t_bdin[15:0];
 // disk 1
 localparam D1_BLK = 16;
 wire        d1_ack, d1_bwr;
-wire  [7:0] d1_baddr;
+wire [12:0] d1_baddr;
 wire [15:0] d1_bdout;
 
 tb_blkdev #(.NBLK(D1_BLK)) d1_dev
 (
 	.clk(clk), .reset(reset),
-	.sd_lba(t_lba[63:32]), .sd_rd(t_rd[1]), .sd_wr(t_wr[1]), .sd_ack(d1_ack),
+	.sd_lba(t_lba[63:32]), .sd_blk_cnt(t_cnt[11:6]), .sd_rd(t_rd[1]), .sd_wr(t_wr[1]), .sd_ack(d1_ack),
 	.sd_buff_addr(d1_baddr), .sd_buff_dout(d1_bdout), .sd_buff_wr(d1_bwr), .sd_buff_din(t_bdin[31:16])
 );
 
 // ID 2: CD-ROM
 localparam CD_SECT = 8;                     // 2048-byte sectors
 wire        cd_ack, cd_bwr;
-wire  [7:0] cd_baddr;
+wire [12:0] cd_baddr;
 wire [15:0] cd_bdout;
 
 tb_blkdev #(.NBLK(CD_SECT * 4)) cd_dev
 (
 	.clk(clk), .reset(reset),
-	.sd_lba(t_lba[95:64]), .sd_rd(t_rd[2]), .sd_wr(t_wr[2]), .sd_ack(cd_ack),
+	.sd_lba(t_lba[95:64]), .sd_blk_cnt(t_cnt[17:12]), .sd_rd(t_rd[2]), .sd_wr(t_wr[2]), .sd_ack(cd_ack),
 	.sd_buff_addr(cd_baddr), .sd_buff_dout(cd_bdout), .sd_buff_wr(cd_bwr), .sd_buff_din(t_bdin[47:32])
 );
 
 // hps_io: one sd_buff bus, sd_ack per slot
 assign t_ack   = {1'b0, cd_ack, d1_ack, sd_ack0};
-assign t_baddr = sd_ack0 ? sd_buff_addr0 : d1_ack ? d1_baddr : cd_ack ? cd_baddr : 8'd0;
+assign t_baddr = sd_ack0 ? sd_buff_addr0 : d1_ack ? d1_baddr : cd_ack ? cd_baddr : 13'd0;
 assign t_bdout = sd_ack0 ? sd_buff_dout0 : d1_ack ? d1_bdout : cd_ack ? cd_bdout : 16'd0;
 assign t_bwr   = sd_ack0 ? sd_buff_wr0   : d1_ack ? d1_bwr   : cd_ack ? cd_bwr   : 1'b0;
 
@@ -156,6 +157,7 @@ always @(posedge clk)
 	if (!reset) begin
 		if (t_rd[3] || t_wr[3]) chk(0, "ID 3 (no image) made a block request");
 		if (t_wr[2]) chk(0, "CD-ROM made a block write");
+		if (t_rd[2] && t_cnt[17:12] != 6'd0) chk(0, "CD-ROM asked for more than one block");
 		if ($countones(t_rd | t_wr | t_ack) > 1)
 			chk(0, $sformatf("more than one block request at once: rd %b wr %b ack %b", t_rd, t_wr, t_ack));
 		if ((d_spc & d_t) != 0)
@@ -174,21 +176,23 @@ initial begin
 		@(negedge clk);
 		if (sd_rd0 || sd_wr0) begin
 			bit isrd;
-			int l;
+			int l, n;
 			isrd = sd_rd0;
 			l    = sd_lba0;
+			n    = t_cnt[5:0] + 1;
 			chk(!(sd_rd0 && sd_wr0), "sd_rd and sd_wr together");
-			chk(l < NBLK, $sformatf("sd_lba %0d out of range", l));
+			chk(l + n <= NBLK, $sformatf("sd_lba %0d x%0d out of range", l, n));
 			repeat ($urandom_range(5, 60) + slow0) begin
 				@(negedge clk);
 				chk(isrd ? sd_rd0 : sd_wr0, "block request dropped before sd_ack");
 				chk(sd_lba0 == l, "sd_lba changed while requesting");
+				chk(t_cnt[5:0] + 1 == n, "sd_blk_cnt changed while requesting");
 			end
 			sd_ack0       = 1;
 			sd_buff_addr0 = 0;
 			repeat (2) @(negedge clk);
 			chk(!sd_rd0 && !sd_wr0, "block request still up after sd_ack");
-			for (int w = 0; w < 256; w++) begin
+			for (int w = 0; w < 256 * n; w++) begin
 				sd_buff_addr0 = w;
 				if (isrd) begin
 					sd_buff_dout0 = {img[l*512 + 2*w + 1], img[l*512 + 2*w]};
@@ -203,7 +207,7 @@ initial begin
 			end
 			repeat (2) @(negedge clk);
 			sd_ack0 = 0;
-			if (isrd) blk_reads++; else blk_writes++;
+			if (isrd) blk_reads += n; else blk_writes += n;
 		end
 	end
 end
@@ -1143,15 +1147,17 @@ module tb_blkdev
 	input      [31:0] sd_lba,
 	input             sd_rd,
 	input             sd_wr,
+	input       [5:0] sd_blk_cnt,
 	output reg        sd_ack = 0,
-	output reg  [7:0] sd_buff_addr = 0,
+	output reg [12:0] sd_buff_addr = 0,
 	output reg [15:0] sd_buff_dout = 0,
 	output reg        sd_buff_wr = 0,
 	input      [15:0] sd_buff_din
 );
 
 reg [7:0] img [0:NBLK*512-1];
-integer   errors = 0, reads = 0, writes = 0;
+integer   errors = 0, reads = 0, writes = 0;   // blocks
+integer   reqs = 0;                             // requests
 
 task automatic err(input string what);
 	errors++;
@@ -1163,36 +1169,39 @@ initial begin
 		@(negedge clk);
 		if (!reset && (sd_rd || sd_wr)) begin
 			bit isrd;
-			int l;
+			int l, n;
 			isrd = sd_rd;
 			l    = sd_lba;
+			n    = sd_blk_cnt + 1;
 			if (sd_rd && sd_wr) err("sd_rd and sd_wr together");
-			if (l >= NBLK) err($sformatf("sd_lba %0d out of range", l));
+			if (l + n > NBLK) err($sformatf("sd_lba %0d x%0d out of range", l, n));
 			repeat ($urandom_range(5, 60)) begin
 				@(negedge clk);
 				if (!(isrd ? sd_rd : sd_wr)) err("block request dropped before sd_ack");
 				if (sd_lba != l) err("sd_lba changed while requesting");
+				if (sd_blk_cnt + 1 != n) err("sd_blk_cnt changed while requesting");
 			end
 			sd_ack       = 1;
 			sd_buff_addr = 0;
 			repeat (2) @(negedge clk);
 			if (sd_rd || sd_wr) err("block request still up after sd_ack");
-			for (int w = 0; w < 256; w++) begin
+			for (int w = 0; w < 256 * n; w++) begin
 				sd_buff_addr = w;
 				if (isrd) begin
-					sd_buff_dout = (l < NBLK) ? {img[l*512 + 2*w + 1], img[l*512 + 2*w]} : 16'h0000;
+					sd_buff_dout = (l*512 + 2*w < NBLK*512) ? {img[l*512 + 2*w + 1], img[l*512 + 2*w]} : 16'h0000;
 					@(negedge clk); sd_buff_wr = 1;
 					@(negedge clk); sd_buff_wr = 0;
 					@(negedge clk);
 				end
 				else begin
 					repeat ($urandom_range(2, 4)) @(negedge clk);
-					if (l < NBLK) {img[l*512 + 2*w + 1], img[l*512 + 2*w]} = sd_buff_din;
+					if (l*512 + 2*w < NBLK*512) {img[l*512 + 2*w + 1], img[l*512 + 2*w]} = sd_buff_din;
 				end
 			end
 			repeat (2) @(negedge clk);
 			sd_ack = 0;
-			if (isrd) reads++; else writes++;
+			reqs++;
+			if (isrd) reads += n; else writes += n;
 		end
 	end
 end

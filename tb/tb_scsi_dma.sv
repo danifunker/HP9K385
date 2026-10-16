@@ -70,9 +70,10 @@ wire  [7:0] dack_wdata, dack_rdata;
 reg   [2:0] img_mounted = 0;
 reg  [63:0] img_size = 0;
 wire [95:0] sd_lba;
+wire [17:0] sd_blk_cnt;
 wire  [2:0] sd_rd, sd_wr;
 wire        d0_ack, d0_bwr;
-wire  [7:0] d0_baddr;
+wire [12:0] d0_baddr;
 wire [15:0] d0_bdout;
 wire [47:0] sd_buff_din;
 
@@ -82,14 +83,14 @@ hp98265a card (
 	.irq(c_irq), .dmar(dmar),
 	.dack_rd(dack_rd), .dack_wr(dack_wr), .dack_ch(dack_ch), .dack_wdata(dack_wdata), .dack_rdata(dack_rdata),
 	.img_mounted(img_mounted), .img_size(img_size), .img_readonly(1'b0),
-	.sd_lba(sd_lba), .sd_rd(sd_rd), .sd_wr(sd_wr), .sd_ack({2'b00, d0_ack}),
+	.sd_lba(sd_lba), .sd_blk_cnt(sd_blk_cnt), .sd_rd(sd_rd), .sd_wr(sd_wr), .sd_ack({2'b00, d0_ack}),
 	.sd_buff_addr(d0_baddr), .sd_buff_dout(d0_bdout), .sd_buff_wr(d0_bwr), .sd_buff_din(sd_buff_din)
 );
 
 // ID 0: a 64-block disk; IDs 1 (disk) and 2 (CD) have no image
 tb_blkdev #(.NBLK(NBLK)) d0 (
 	.clk(clk), .reset(reset),
-	.sd_lba(sd_lba[31:0]), .sd_rd(sd_rd[0]), .sd_wr(sd_wr[0]), .sd_ack(d0_ack),
+	.sd_lba(sd_lba[31:0]), .sd_blk_cnt(sd_blk_cnt[5:0]), .sd_rd(sd_rd[0]), .sd_wr(sd_wr[0]), .sd_ack(d0_ack),
 	.sd_buff_addr(d0_baddr), .sd_buff_dout(d0_bdout), .sd_buff_wr(d0_bwr), .sd_buff_din(sd_buff_din[15:0])
 );
 
@@ -114,9 +115,10 @@ hp98620 dma (
 	.irq_lvl(dma_irq)
 );
 
-// memory: 16 KB at 0x10000, byte writes, longword reads, 1-4 clocks
+// memory: 64 KB at 0x10000, byte writes, longword reads, 1-4 clocks
 localparam MBASE = 32'h0001_0000;
-reg [7:0] mem [0:16383];
+localparam MSIZE = 65536;
+reg [7:0] mem [0:MSIZE-1];
 integer mlat = 0;
 always @(posedge clk) begin
 	mack <= 0; merr <= 0;
@@ -124,7 +126,7 @@ always @(posedge clk) begin
 		if (mlat == 0) mlat <= $urandom_range(1, 4);
 		else if (mlat == 1) begin
 			mlat <= 0;
-			if (maddr < MBASE || maddr >= MBASE + 16384) merr <= 1;
+			if (maddr < MBASE || maddr >= MBASE + MSIZE) merr <= 1;
 			else begin
 				if (mwe) mem[maddr - MBASE] <= mwdata;
 				mrdata <= {mem[{maddr[31:2], 2'd0} - MBASE], mem[{maddr[31:2], 2'd1} - MBASE],
@@ -426,6 +428,34 @@ reg [7:0] cdb [16];
 reg [7:0] st, v;
 int got;
 
+// WRITE(10) of nb blocks at lba from mem[0x8000...], then READ(10) into
+// mem[0...]; checks the image, the data and the number of HPS requests
+task automatic rw_timed(input int lba, input int nb, input int nreq);
+	int bad, r0;
+	time t0;
+	for (int i = 0; i < nb * 512; i++) mem['h8000 + i] = $urandom;
+	for (int i = 0; i < 16; i++) cdb[i] = 0;
+	cdb[0] = 8'h2A; cdb[5] = lba; cdb[8] = nb;
+	r0 = d0.reqs; t0 = $time;
+	nb_cmd(0, cdb, 10, nb * 512, 'h8000, st, got);
+	chk(st == 8'h00 && got == nb * 512, $sformatf("WRITE(10) x%0d: status %02x, %0d bytes", nb, st, got));
+	$display("WRITE(10) %0d blocks: %0d clocks, %0d HPS requests", nb, ($time - t0) / 30, d0.reqs - r0);
+	chk(d0.reqs - r0 == nreq, $sformatf("WRITE(10) x%0d: %0d HPS requests, want %0d", nb, d0.reqs - r0, nreq));
+	bad = 0;
+	for (int i = 0; i < nb * 512; i++) if (d0.img[lba * 512 + i] != mem['h8000 + i]) bad++;
+	chk(bad == 0, $sformatf("WRITE(10) x%0d: %0d bytes differ in the image", nb, bad));
+	for (int i = 0; i < nb * 512; i++) mem[i] = 8'h00;
+	cdb[0] = 8'h28;
+	r0 = d0.reqs; t0 = $time;
+	nb_cmd(0, cdb, 10, nb * 512, 'h0000, st, got);
+	chk(st == 8'h00 && got == nb * 512, $sformatf("READ(10) x%0d: status %02x, %0d bytes", nb, st, got));
+	$display("READ(10) %0d blocks: %0d clocks, %0d HPS requests", nb, ($time - t0) / 30, d0.reqs - r0);
+	chk(d0.reqs - r0 == nreq, $sformatf("READ(10) x%0d: %0d HPS requests, want %0d", nb, d0.reqs - r0, nreq));
+	bad = 0;
+	for (int i = 0; i < nb * 512; i++) if (mem[i] != mem['h8000 + i]) bad++;
+	chk(bad == 0, $sformatf("READ(10) x%0d after WRITE(10): %0d bytes differ", nb, bad));
+endtask
+
 task automatic probe(input int tgt, input [7:0] dtype, input [7:0] rmb, input string prod, input [7:0] tur_stat);
 	reg [7:0] exp [36];
 	string vend;
@@ -537,33 +567,12 @@ initial begin
 	dma_ch = 1;
 	probe(1, 8'h00, 8'h00, "SCSI DISK       ", 8'h02);
 
-	//---- 4. an 8 KB file-system block (HP-UX HFS) written and read back by
-	// longword DMA, timed ----
-	$display("-- WRITE(10) and READ(10) of 16 blocks by DMA, timed");
+	//---- 4. an 8 KB file-system block (HP-UX HFS), and 40 blocks (more
+	// than one HPS request), written and read back by longword DMA, timed ----
+	$display("-- WRITE(10) and READ(10) by DMA, timed");
 	acc_dly = 10;
-	begin
-		int bad, w0, r0;
-		time t0;
-		for (int i = 0; i < 8192; i++) mem['h2000 + i] = $urandom;
-		for (int i = 0; i < 16; i++) cdb[i] = 0;
-		cdb[0] = 8'h2A; cdb[5] = 8; cdb[8] = 16;
-		w0 = d0.writes; t0 = $time;
-		nb_cmd(0, cdb, 10, 8192, 'h2000, st, got);
-		chk(st == 8'h00 && got == 8192, $sformatf("WRITE(10): status %02x, %0d bytes", st, got));
-		$display("WRITE(10) 16 blocks: %0d clocks, %0d block requests", ($time - t0) / 30, d0.writes - w0);
-		bad = 0;
-		for (int i = 0; i < 8192; i++) if (d0.img[8 * 512 + i] != mem['h2000 + i]) bad++;
-		chk(bad == 0, $sformatf("WRITE(10): %0d bytes differ in the image", bad));
-		for (int i = 0; i < 8192; i++) mem[i] = 8'h00;
-		cdb[0] = 8'h28;
-		r0 = d0.reads; t0 = $time;
-		nb_cmd(0, cdb, 10, 8192, 'h0000, st, got);
-		chk(st == 8'h00 && got == 8192, $sformatf("READ(10): status %02x, %0d bytes", st, got));
-		$display("READ(10) 16 blocks: %0d clocks, %0d block requests", ($time - t0) / 30, d0.reads - r0);
-		bad = 0;
-		for (int i = 0; i < 8192; i++) if (mem[i] != mem['h2000 + i]) bad++;
-		chk(bad == 0, $sformatf("READ(10) after WRITE(10): %0d bytes differ", bad));
-	end
+	rw_timed(8, 16, 1);
+	rw_timed(20, 40, 2);
 
 	errors += d0.errors;
 	if (errors == 0) $display("ALL TESTS PASSED");
