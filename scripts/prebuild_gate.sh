@@ -8,8 +8,10 @@
 #    the SCSI card's register test, DMA disk reads, the CPU and the console;
 # 3. with a CD on ID 2 as well (if scratch/sw/OpenBSD55 is there), the ROM
 #    finds and boots the CD;
-# 4. soft reboot: tools/rebootbench boots, jumps back into the ROM the way
-#    HP-UX and BSD reboot ($1A4), and the ROM finds the keyboard and the disk
+# 4. soft reboot: tools/rebootbench boots, leaves the serial and SCSI
+#    cards' interrupts enabled (one pending) as a running OS does, jumps back
+#    into the ROM the way HP-UX and BSD reboot ($1A4), and the ROM finds the
+#    keyboard and the disk
 #    and boots it again (LED 92) by ~131M clocks.  "HP-HIL Failed" still
 #    boots, but its 2.6 s time-out puts that at ~217M, past the 180M limit.
 # Uses the fast selection time-out sim build (obj_fast).
@@ -49,7 +51,7 @@ if [ -f "$CD" ]; then
 fi
 
 echo "== soft reboot (ROM REQ_REBOOT) and boot again"
-"$ROOT/tools/rebootbench/build.sh" "$OUT/reboot.img" > /dev/null
+DIRTY=1 "$ROOT/tools/rebootbench/build.sh" "$OUT/reboot.img" > /dev/null
 rstop=$(grep "done:" "$ROOT/build/rebootbench/reboot.lst" | awk '{print substr($1,4)}')
 # a soft reboot makes the ROM wait 5 s after its SCSI bus reset ($1794C:
 # move.l #5000000 us); the patch makes that 19 ms (165M clocks less)

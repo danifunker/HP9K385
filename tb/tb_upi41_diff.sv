@@ -261,6 +261,7 @@ initial begin
 
 	load_rom();
 	repeat (5) @(negedge clk);
+	ref_cpu.ram[8'h7F] = 8'h00;                   // as the DUT's full reset does
 	running = 1;
 	reset = 0;
 
@@ -274,6 +275,8 @@ initial begin
 		if (cyc >= next_reset) begin                // reset at a random point
 			reset = 1;
 			repeat (1 + $urandom % 4) @(negedge clk);
+			ref_cpu.ram[8'h7F] = 8'h00;           // the DUT's full reset breaks the firmware's
+			                                      // warm-start signature (upi41 keep_dbb = 0)
 			if (randrom) begin random_rom(); load_rom(); end   // new random program
 			reset = 0;
 			n_resets++;
