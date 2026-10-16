@@ -6,6 +6,7 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/wombat/wombat_store_buffer.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/wombat/wombat_bus32.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/mem/sdram.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/mem/sdram_beat32.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/mem/rom_bram.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ptm6840.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/catseye.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/nereid.sv

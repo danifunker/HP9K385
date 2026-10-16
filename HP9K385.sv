@@ -8,8 +8,8 @@
 //
 //  The machine is rtl/hp385_top.sv; this file is the MiSTer shell around it:
 //    clocks     33.000 MHz clk_sys (CPU, devices), 99 MHz clk_ram (SDRAM)
-//    SDRAM      main RAM at 0 (8/16/32 MB), boot ROM at ROM_BASE, 98550A card
-//               ROM at CARD_BASE (both loaded at start-up)
+//    SDRAM      main RAM at 0 (8/16/32/64/128 MB); boot ROM and 98550A card ROM
+//               in block RAM (rtl/mem/rom_bram.sv), loaded at start-up
 //    DDR3       98550A VRAM at 0x3000_0000 (video) / 0x3020_0000 (overlay),
 //               scanned out by the MiSTer framebuffer (8 bpp, stride 2048)
 //    palette    the Nereid colormap, mirrored into the framebuffer palette
@@ -70,7 +70,7 @@ localparam CONF_STR = {
 	"SC1,IMGHDVRAW,SCSI 1;",
 	"SC2,ISOCUECHD,CD-ROM (SCSI 2);",
 	"-;",
-	"O[3:2],RAM,8 MB,16 MB,32 MB;",
+	"O[4:2],RAM,8 MB,16 MB,32 MB,64 MB,128 MB (128 MB SDRAM);",
 	"O[122:121],Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
 	"-;",
 	"T[0],Reset;",
@@ -161,9 +161,9 @@ pll pll
 
 ///////////////////////   ROM LOADING   //////////////////////////
 
-// boot0.rom (index 0) boot ROM, boot1.rom (0x40) card ROM, boot2.rom (0x80) 8042
-localparam [26:2] ROM_BASE  = 25'h0FF_0000;     // byte 0x3FC_0000 (top 256 KB of 64 MB)
-localparam [26:2] CARD_BASE = 25'h0FF_8000;     // byte 0x3FE_0000
+// boot0.rom (index 0) boot ROM, boot1.rom (0x40) card ROM, boot2.rom (0x80)
+// 8042.  The boot and card ROMs live in block RAM (rom_bram), so all of the
+// SDRAM is main RAM.
 
 wire       dl_boot = ioctl_index[7:6] == 2'd0;
 wire       dl_card = ioctl_index[7:6] == 2'd1;
@@ -182,14 +182,12 @@ end
 
 wire reset = RESET | status[0] | buttons[1] | ioctl_download | !loaded[0] | !pll_locked;
 
-// SDRAM writes for the boot and card ROMs.  ioctl words arrive with the
-// file's first byte in [7:0]: the MAME boot ROM file is word-swapped, so its
-// words are already the CPU's big-endian view; the card ROM is a plain byte
-// stream and is swapped into big-endian lanes.
-reg         ld_req;
-reg  [26:2] ld_addr;
-reg   [3:0] ld_be;
-reg  [31:0] ld_wdata;
+// Boot and card ROM downloads.  ioctl words arrive with the file's first
+// byte in [7:0]: the MAME boot ROM file is word-swapped, so its words are
+// already the CPU's big-endian view; the card ROM is a plain byte stream and
+// is swapped into big-endian lanes.  ioctl_addr[1] picks the longword half.
+wire        rom_we  = ioctl_download && ioctl_wr && dl_boot;
+wire        card_we = ioctl_download && ioctl_wr && dl_card;
 wire        sdr_ack;                  // SDRAM beat acknowledge
 
 // 8042 firmware: straight into its block RAM, a byte per clock
@@ -203,32 +201,27 @@ always @(posedge clk_sys) begin
 	if (hil_second) begin
 		hil_wr <= 1'b1; hil_addr <= hil_addr + 11'd1; hil_data <= hil_hi; hil_second <= 1'b0;
 	end
-	if (ld_req && sdr_ack) begin
-		ld_req     <= 1'b0;
-		ioctl_wait <= 1'b0;
-	end
-	if (ioctl_download && ioctl_wr) begin
-		if (dl_hil) begin
-			hil_wr <= 1'b1; hil_addr <= {ioctl_addr[10:1], 1'b0}; hil_data <= ioctl_dout[7:0];
-			hil_hi <= ioctl_dout[15:8]; hil_second <= 1'b1;
-		end
-		else if (dl_boot || dl_card) begin
-			ld_req     <= 1'b1;
-			ioctl_wait <= 1'b1;
-			ld_addr    <= (dl_boot ? ROM_BASE : CARD_BASE) + {8'd0, ioctl_addr[16:2]};
-			ld_be      <= ioctl_addr[1] ? 4'b0011 : 4'b1100;
-			ld_wdata   <= dl_boot ? {2{ioctl_dout}} : {2{ioctl_dout[7:0], ioctl_dout[15:8]}};
-		end
+	if (ioctl_download && ioctl_wr && dl_hil) begin
+		hil_wr <= 1'b1; hil_addr <= {ioctl_addr[10:1], 1'b0}; hil_data <= ioctl_dout[7:0];
+		hil_hi <= ioctl_dout[15:8]; hil_second <= 1'b1;
 	end
 end
 
 ///////////////////////   MACHINE   //////////////////////////////
 
-wire [11:0] ram_mask = status[3:2] == 2'd2 ? 12'hFE0 :     // 32 MB
-                       status[3:2] == 2'd1 ? 12'hFF0 :     // 16 MB
-                                             12'hFF8;      //  8 MB
+// RAM at the top of the address space, a power of two from 8 to 128 MB (the
+// 128 MB setting needs a 128 MB SDRAM module: SDRAM address bit 26 is the
+// second chip select)
+wire [11:0] ram_mask = status[4:2] == 3'd4 ? 12'hF80 :     // 128 MB
+                       status[4:2] == 3'd3 ? 12'hFC0 :     //  64 MB
+                       status[4:2] == 3'd2 ? 12'hFE0 :     //  32 MB
+                       status[4:2] == 3'd1 ? 12'hFF0 :     //  16 MB
+                                             12'hFF8;      //   8 MB
 
 wire        mem_req, mem_we;
+wire        mem_rom;                  // a boot / card ROM beat (block RAM, not SDRAM)
+reg         rom_ack;
+reg  [31:0] rom_rdata;
 wire  [1:0] mem_sel;
 wire [31:2] mem_addr;
 wire  [3:0] mem_be;
@@ -277,8 +270,8 @@ hp385_top machine
 	.mem_addr(mem_addr),
 	.mem_be(mem_be),
 	.mem_wdata(mem_wdata),
-	.mem_ack(sdr_ack && !ld_req),
-	.mem_rdata(sdr_rdata),
+	.mem_ack(mem_rom ? rom_ack : sdr_ack),
+	.mem_rdata(mem_rom ? rom_rdata : sdr_rdata),
 
 	.leds(leds),
 
@@ -335,10 +328,38 @@ hp385_top machine
 
 ///////////////////////   SDRAM   ////////////////////////////////
 
-// machine addresses -> SDRAM: RAM from 0, ROMs at the top
-wire [26:2] m_sd_addr = mem_sel == 2'd0 ? ROM_BASE  + {10'd0, mem_addr[16:2]} :
-                        mem_sel == 2'd2 ? CARD_BASE + {12'd0, mem_addr[14:2]} :
-                                          {2'b00, mem_addr[24:2] & {~ram_mask[4:0], 18'h3FFFF}};
+// machine addresses -> SDRAM: RAM from 0 (mem_sel 1); the boot ROM
+// (mem_sel 0, 128 KB) and the 98550A card ROM (mem_sel 2, 32 KB) are block RAM
+assign      mem_rom   = (mem_sel != 2'd1);
+wire [26:2] m_sd_addr = mem_addr[26:2] & {~ram_mask[6:0], 18'h3FFFF};
+
+wire [31:0] boot_q, card_q;
+rom_bram #(.AW(15)) boot_rom
+(
+	.clk(clk_sys),
+	.we(rom_we), .waddr(ioctl_addr[16:2]), .whalf(ioctl_addr[1]), .wdata(ioctl_dout),
+	.raddr(mem_addr[16:2]), .q(boot_q)
+);
+rom_bram #(.AW(13)) card_rom
+(
+	.clk(clk_sys),
+	.we(card_we), .waddr(ioctl_addr[14:2]), .whalf(ioctl_addr[1]), .wdata({ioctl_dout[7:0], ioctl_dout[15:8]}),
+	.raddr(mem_addr[14:2]), .q(card_q)
+);
+
+// ROM beats: the address is held with mem_req, so q is valid the clock after
+// the request is seen; ack one clock after that (one pulse per request)
+reg         rom_busy;
+always @(posedge clk_sys) begin
+	rom_ack <= 1'b0;
+	if (reset) rom_busy <= 1'b0;
+	else if (rom_busy) begin
+		rom_busy  <= 1'b0;
+		rom_ack   <= 1'b1;
+		rom_rdata <= (mem_sel == 2'd0) ? boot_q : card_q;
+	end
+	else if (mem_req && mem_rom && !rom_ack) rom_busy <= 1'b1;
+end
 
 sdram_beat32 sdram
 (
@@ -346,11 +367,11 @@ sdram_beat32 sdram
 	.clk_sys(clk_sys),
 	.clk_ram(clk_ram),
 
-	.req(ld_req | mem_req),
-	.we(ld_req ? 1'b1 : mem_we),
-	.addr(ld_req ? ld_addr : m_sd_addr),
-	.be(ld_req ? ld_be : mem_be),
-	.wdata(ld_req ? ld_wdata : mem_wdata),
+	.req(mem_req && !mem_rom),
+	.we(mem_we),
+	.addr(m_sd_addr),
+	.be(mem_be),
+	.wdata(mem_wdata),
 	.ack(sdr_ack),
 	.rdata(sdr_rdata),
 	.busy(),
