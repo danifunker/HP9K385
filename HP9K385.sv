@@ -70,8 +70,9 @@ localparam CONF_STR = {
 	"SC1,IMGHDVRAW,SCSI 1;",
 	"SC2,ISOCUECHD,CD-ROM (SCSI 2);",
 	"-;",
-	"O[4:2],RAM,8 MB,16 MB,32 MB,64 MB,128 MB (128 MB SDRAM);",
-	"O[5],Fast boot (no RAM test),No,Yes;",
+	// index 0 of each option is its default (status 0 with no saved .CFG)
+	"O[4:2],RAM,Auto (SDRAM size),8 MB,16 MB,32 MB,64 MB,128 MB (128 MB SDRAM);",
+	"O[5],Fast boot (no RAM test),Yes,No;",
 	"-;",
 	// LAN: the 98643A at select code 21; Main's hp9k_enet bridge carries its
 	// frames (status 14:12 as on the HP 9000/715 core: 0 eth0, 1 Off, ...)
@@ -81,7 +82,9 @@ localparam CONF_STR = {
 	"-;",
 	"T[0],Reset;",
 	"R[0],Reset and close OSD;",
-	"v,0;",
+	// config version: 1 when RAM gained Auto and Fast boot became Yes by
+	// default; Main drops a .CFG saved under another version
+	"v,1;",
 	"V,v",`BUILD_DATE
 };
 
@@ -132,6 +135,7 @@ hps_io #(.CONF_STR(CONF_STR), .WIDE(1), .VDNUM(3), .BLKSZ(2)) hps_io
 	.buttons(buttons),
 	.status(status),
 	.status_menumask(16'd0),
+	.sdram_sz(sdram_sz),
 
 	.ps2_key(ps2_key),
 	.RTC(rtc),
@@ -222,12 +226,20 @@ end
 
 // RAM at the top of the address space, a power of two from 8 to 128 MB (the
 // 128 MB setting needs a 128 MB SDRAM module: SDRAM address bit 26 is the
-// second chip select)
-wire [11:0] ram_mask = status[4:2] == 3'd4 ? 12'hF80 :     // 128 MB
-                       status[4:2] == 3'd3 ? 12'hFC0 :     //  64 MB
-                       status[4:2] == 3'd2 ? 12'hFE0 :     //  32 MB
-                       status[4:2] == 3'd1 ? 12'hFF0 :     //  16 MB
-                                             12'hFF8;      //   8 MB
+// second chip select).  OSD index: 0 Auto (the default), 1 8 MB, 2 16 MB,
+// 3 32 MB, 4 64 MB, 5 128 MB.  Auto takes the module size the menu core
+// measured (hps_io sdram_sz: [15] valid, [1:0] 1 = 32, 2 = 64, 3 = 128 MB),
+// and 32 MB if it is unknown.
+wire [15:0] sdram_sz;
+wire  [2:0] ram_auto = !sdram_sz[15]         ? 3'd3 :
+                       sdram_sz[1:0] == 2'd3 ? 3'd5 :
+                       sdram_sz[1:0] == 2'd2 ? 3'd4 : 3'd3;
+wire  [2:0] ram_sel  = (status[4:2] == 3'd0) ? ram_auto : status[4:2];
+wire [11:0] ram_mask = ram_sel == 3'd5 ? 12'hF80 :     // 128 MB
+                       ram_sel == 3'd4 ? 12'hFC0 :     //  64 MB
+                       ram_sel == 3'd3 ? 12'hFE0 :     //  32 MB
+                       ram_sel == 3'd2 ? 12'hFF0 :     //  16 MB
+                                         12'hFF8;      //   8 MB
 
 wire        mem_req, mem_we;
 wire        mem_rom;                  // a boot / card ROM beat (block RAM, not SDRAM)
@@ -390,7 +402,7 @@ rom_bram #(.AW(13)) card_rom
 // BSR checksum -> MOVEQ #0,D0 / NOP), as docs/disasm/tools/bootrom_simpatch.py
 // does for the sim.  Each word is replaced only if it holds the expected
 // original, so another ROM revision is left alone.
-wire fast_boot = status[5];
+wire fast_boot = !status[5];               // OSD: Yes is index 0, the default
 function [31:0] boot_patch;
 	input [31:0] q;
 	input [14:0] a;                           // longword address
