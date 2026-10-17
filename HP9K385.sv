@@ -11,7 +11,8 @@
 //    SDRAM      main RAM at 0 (8/16/32/64/128 MB); boot ROM and 98550A card ROM
 //               in block RAM (rtl/mem/rom_bram.sv), loaded at start-up
 //    DDR3       98550A VRAM at 0x3000_0000 (video) / 0x3020_0000 (overlay),
-//               scanned out by the MiSTer framebuffer (8 bpp, stride 2048)
+//               8 bpp, stride 2048, read by rtl/scanout.sv (not the MiSTer
+//               framebuffer: FB_EN is 0)
 //    palette    the Nereid colormap, mirrored into the framebuffer palette
 //    ROMs       games/HP9K385/boot0.rom  boot ROM 1818-5062 (MAME word order)
 //                                boot1.rom  98550A ROM 98550a.bin
@@ -71,7 +72,7 @@ localparam CONF_STR = {
 	"SC2,ISOCUECHD,CD-ROM (SCSI 2);",
 	"-;",
 	// index 0 of each option is its default (status 0 with no saved .CFG)
-	"O[4:2],RAM,Auto (SDRAM size),8 MB,16 MB,32 MB,64 MB,128 MB (128 MB SDRAM);",
+	"O[4:2],RAM,32 MB,64 MB,128 MB (128 MB SDRAM),8 MB,16 MB;",
 	"O[5],Fast boot (no RAM test),Yes,No;",
 	"-;",
 	// LAN: the 98643A at select code 21; Main's hp9k_enet bridge carries its
@@ -82,8 +83,8 @@ localparam CONF_STR = {
 	"-;",
 	"T[0],Reset;",
 	"R[0],Reset and close OSD;",
-	// config version: 1 when RAM gained Auto and Fast boot became Yes by
-	// default; Main drops a .CFG saved under another version
+	// config version: 1 when RAM became 32 MB and Fast boot Yes by default;
+	// Main drops a .CFG saved under another version
 	"v,1;",
 	"V,v",`BUILD_DATE
 };
@@ -135,7 +136,6 @@ hps_io #(.CONF_STR(CONF_STR), .WIDE(1), .VDNUM(3), .BLKSZ(2)) hps_io
 	.buttons(buttons),
 	.status(status),
 	.status_menumask(16'd0),
-	.sdram_sz(sdram_sz),
 
 	.ps2_key(ps2_key),
 	.RTC(rtc),
@@ -226,20 +226,16 @@ end
 
 // RAM at the top of the address space, a power of two from 8 to 128 MB (the
 // 128 MB setting needs a 128 MB SDRAM module: SDRAM address bit 26 is the
-// second chip select).  OSD index: 0 Auto (the default), 1 8 MB, 2 16 MB,
-// 3 32 MB, 4 64 MB, 5 128 MB.  Auto takes the module size the menu core
-// measured (hps_io sdram_sz: [15] valid, [1:0] 1 = 32, 2 = 64, 3 = 128 MB),
-// and 32 MB if it is unknown.
-wire [15:0] sdram_sz;
-wire  [2:0] ram_auto = !sdram_sz[15]         ? 3'd3 :
-                       sdram_sz[1:0] == 2'd3 ? 3'd5 :
-                       sdram_sz[1:0] == 2'd2 ? 3'd4 : 3'd3;
-wire  [2:0] ram_sel  = (status[4:2] == 3'd0) ? ram_auto : status[4:2];
-wire [11:0] ram_mask = ram_sel == 3'd5 ? 12'hF80 :     // 128 MB
-                       ram_sel == 3'd4 ? 12'hFC0 :     //  64 MB
-                       ram_sel == 3'd3 ? 12'hFE0 :     //  32 MB
-                       ram_sel == 3'd2 ? 12'hFF0 :     //  16 MB
-                                         12'hFF8;      //   8 MB
+// second chip select).  OSD index: 0 32 MB (the default), 1 64 MB,
+// 2 128 MB, 3 8 MB, 4 16 MB.  Latched while the machine is in reset, so a
+// change in the OSD takes effect at the next reset, never under a running OS.
+reg   [2:0] ram_sel = 3'd0;
+always @(posedge clk_sys) if (reset) ram_sel <= status[4:2];
+wire [11:0] ram_mask = ram_sel == 3'd2 ? 12'hF80 :     // 128 MB
+                       ram_sel == 3'd1 ? 12'hFC0 :     //  64 MB
+                       ram_sel == 3'd4 ? 12'hFF0 :     //  16 MB
+                       ram_sel == 3'd3 ? 12'hFF8 :     //   8 MB
+                                         12'hFE0;      //  32 MB
 
 wire        mem_req, mem_we;
 wire        mem_rom;                  // a boot / card ROM beat (block RAM, not SDRAM)
