@@ -92,6 +92,6 @@ Paste the prompt below into a new session to continue. The background follows it
    - Swap Alt/Win keys: Yes, then in an hpterm L Win acts as Extend char and L Alt as Insert line. The mapping is the same as the HP 9000/715's (the PS/2 codes are swapped before `ps2_hil_keymap`).
    - NetBSD (`NetBSD92.img`): boots to login, the keyboard works, clean shutdown.
    - Save settings in the OSD with the final values (128MB, eth0, Fast boot Yes).
-3. **Release.** Once the board test passes, copy the `.rbf` to `releases/HP9K385_<date>.rbf` and commit it, replacing `HP9K385_20261017.rbf` (its OSD is the old one). Note the build and test in `docs/RESUME-20261016.md` or a new resume file.
+3. **Release.** Once the board test passes, copy the `.rbf` to `releases/HP9K385_<date>.rbf` as a new release, next to the existing ones, and commit it. Never replace or delete an existing release, and add no README or other files to `releases/`. Note the build and test in this file.
 
 The open items in `docs/RESUME-20261016.md` (the NetBSD HIL hang, SCSI read-ahead, the HP9K715 slot mask in Main, UnixBench) are unchanged.
