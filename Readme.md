@@ -1,8 +1,6 @@
 # HP 9000 Model 385 core for MiSTer
 
-**Work in progress.**
-
-In simulation, Boot ROM 2.0 runs all of its self-tests and draws its console on the Catseye model. It detects the HIL keyboard and accepts key presses. No hardware build has been tested yet, and there is no storage yet, so nothing boots an OS.
+Boot ROM 2.0, HP-UX 9.10 (with VUE), NetBSD 9.2 and the OpenBSD 5.5 installer run on the board, with SCSI disks and CD-ROM, the HIL keyboard and mouse, and the 98643A LAN card.
 
 This core targets the fastest pure HP 9000 Series 300 machine, the Model 385:
 
@@ -22,6 +20,33 @@ Put these in `games/HP9K385/` on the SD card. They are loaded at start-up.
 | `boot2.rom` | 8042 HIL controller firmware `1820-4784.bin` (2 KB) | MAME set `human_interface` |
 
 Checksums are in [docs/ROMS.md](docs/ROMS.md).
+
+## OSD
+
+The menu follows the layout of the other MiSTer computer cores (HP 9000/715, the Macs ...). Media changes and Input settings take effect at once. Every other setting waits for the next reset: **Apply and reset**, the board's reset button or a core reload. While a setting differs from what the machine is running, the top page shows "Changes pending".
+
+| Page | Row | Values | Notes |
+|---|---|---|---|
+| top | `Pri. disk (ID 0)` | image | SCSI ID 0. With no key pressed, the boot ROM boots the first system it finds, normally this disk. |
+| top | `Disk (ID 1)` | image | SCSI ID 1 |
+| top | `CD-ROM (ID 2)` | ISO / CUE / CHD | SCSI ID 2 |
+| top | `Load ROM` | `.rom` | Another boot ROM, for this session only. A core start always loads `boot0.rom`. |
+| top | `Memory` | 32MB, 64MB, 128MB, 8MB, 16MB | 128MB needs a 128 MB SDRAM module. |
+| top | `Network interface` | eth0, None, eth1, macvlan, tap0 | The MiSTer interface the 98643A LAN card (select code 21) is bridged to. `None` removes the card from the machine. Switching between interfaces takes effect at once. |
+| P2 Video | `Aspect ratio` | Original, Full Screen, [ARC1], [ARC2] | |
+| P3 Input | `Swap Alt/Win keys` | No, Yes | Takes effect at once. Alt is Extend char; R Win is Stop and L Win is Insert line (see `rtl/ps2_hil_keymap.sv`). |
+| P5 Advanced | `Fast boot` | Yes, No | Yes skips the boot ROM's RAM test. |
+
+The boot ROM's network boot waits about 12 s for a server when the LAN card is fitted and none answers.
+
+An MGL file can start the core with another boot ROM:
+
+```xml
+<mistergamedescription>
+  <rbf>_Unstable/HP9K385</rbf>
+  <file delay="1" type="f" index="0" path="../../../../games/HP9K385/other.rom"/>
+</mistergamedescription>
+```
 
 ## Simulation
 

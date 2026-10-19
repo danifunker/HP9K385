@@ -55,37 +55,58 @@ assign BUTTONS = 0;
 
 //////////////////////////////////////////////////////////////////
 
-wire [1:0] ar = status[122:121];
+// the settings the machine runs with (taken at reset, below)
+reg [127:0] cfg = 0;
+wire        cfg_pending;
+
+wire [1:0] ar = cfg[122:121];
 
 // 1280 x 1024 is 5:4
 assign VIDEO_ARX = (!ar) ? 12'd5 : (ar - 1'd1);
 assign VIDEO_ARY = (!ar) ? 12'd4 : 12'd0;
 
 `include "build_id.v"
+// The OSD follows the computer-core standard (hp9000-715
+// docs/osd-standard.md): the media and Load ROM, Memory and Network
+// interface on the top page, then Video (P2), Input (P3) and Advanced (P5).
+// Every setting but the media and Input waits for the next reset ("Apply and
+// reset"; cfg below), and "Changes pending" (menumask bit 0) shows while one
+// differs from what is running.
 localparam CONF_STR = {
 	"HP9K385;;",
 	"-;",
 	// "SC": Main_MiSTer remembers the image (config/HP9K385.s<n>) and
-	// mounts it again at every core start
-	"SC0,IMGHDVRAW,SCSI 0;",
-	"SC1,IMGHDVRAW,SCSI 1;",
-	"SC2,ISOCUECHD,CD-ROM (SCSI 2);",
+	// mounts it again at every core start; F0 loads another boot ROM through
+	// the boot0.rom path (ioctl index 0) for this session only
+	"SC0,IMGHDVRAW,Pri. disk (ID 0);",
+	"SC1,IMGHDVRAW,Disk (ID 1);",
+	"SC2,ISOCUECHD,CD-ROM (ID 2);",
+	"F0,ROM,Load ROM;",
 	"-;",
-	// index 0 of each option is its default (status 0 with no saved .CFG)
-	"O[4:2],RAM,32 MB,64 MB,128 MB (128 MB SDRAM),8 MB,16 MB;",
-	"O[5],Fast boot (no RAM test),Yes,No;",
+	// index 0 of each option is its default (status 0 with no saved .CFG);
+	// 128MB needs a 128 MB SDRAM module
+	"O[4:2],Memory,32MB,64MB,128MB,8MB,16MB;",
+	// the 98643A LAN card at select code 21; None removes the card. Main's
+	// hp9k_enet bridge reads these bits itself, so the link acts at once
+	"O[14:12],Network interface,eth0,None,eth1,macvlan,tap0;",
 	"-;",
-	// LAN: the 98643A at select code 21; Main's hp9k_enet bridge carries its
-	// frames (status 14:12 as on the HP 9000/715 core: 0 eth0, 1 Off, ...)
-	"O[15],LAN card (98643A),Present,Absent;",
-	"O[14:12],Network,eth0,Off,eth1,macvlan,tap0;",
-	"O[122:121],Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
+	"P2,Video;",
+	"P3,Input;",
+	"P5,Advanced;",
 	"-;",
-	"T[0],Reset;",
-	"R[0],Reset and close OSD;",
+	"h0-,Changes pending;",
+	"R[0],Apply and reset;",
+
+	"P2O[122:121],Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
+
+	"P3O[19],Swap Alt/Win keys,No,Yes;",
+
+	"P5O[5],Fast boot,Yes,No;",
+
 	// config version: 1 when RAM became 32 MB and Fast boot Yes by default;
-	// Main drops a .CFG saved under another version
-	"v,1;",
+	// 2 when Network interface None took over the LAN card row (status bit
+	// 15, now unused). Main drops a .CFG saved under another version
+	"v,2;",
 	"V,v",`BUILD_DATE
 };
 
@@ -135,7 +156,7 @@ hps_io #(.CONF_STR(CONF_STR), .WIDE(1), .VDNUM(3), .BLKSZ(2)) hps_io
 
 	.buttons(buttons),
 	.status(status),
-	.status_menumask(16'd0),
+	.status_menumask({15'd0, cfg_pending}),
 
 	.ps2_key(ps2_key),
 	.RTC(rtc),
@@ -197,6 +218,16 @@ end
 
 wire reset = RESET | status[0] | buttons[1] | ioctl_download | !loaded[0] | !pll_locked;
 
+// the settings the machine runs with: the OSD's values, taken while the
+// machine is in reset (Apply and reset, the board's button, a core start or
+// a ROM load), so a change waits for the next reset. Input (Swap Alt/Win
+// keys) and the network link (Main reads it itself) act at once; only the
+// LAN card's presence (Network interface None or not) waits.
+always @(posedge clk_sys) if (reset) cfg <= status;
+wire   cfg_lan     = cfg[14:12] != 3'd1;
+assign cfg_pending = {status[5:2], status[14:12] != 3'd1, status[122:121]}
+                  != {cfg[5:2],    cfg_lan,               cfg[122:121]};
+
 // Boot and card ROM downloads.  ioctl words arrive with the file's first
 // byte in [7:0]: the MAME boot ROM file is word-swapped, so its words are
 // already the CPU's big-endian view; the card ROM is a plain byte stream and
@@ -227,10 +258,9 @@ end
 // RAM at the top of the address space, a power of two from 8 to 128 MB (the
 // 128 MB setting needs a 128 MB SDRAM module: SDRAM address bit 26 is the
 // second chip select).  OSD index: 0 32 MB (the default), 1 64 MB,
-// 2 128 MB, 3 8 MB, 4 16 MB.  Latched while the machine is in reset, so a
-// change in the OSD takes effect at the next reset, never under a running OS.
-reg   [2:0] ram_sel = 3'd0;
-always @(posedge clk_sys) if (reset) ram_sel <= status[4:2];
+// 2 128 MB, 3 8 MB, 4 16 MB.  From cfg, so a change in the OSD takes effect
+// at the next reset, never under a running OS.
+wire  [2:0] ram_sel = cfg[4:2];
 wire [11:0] ram_mask = ram_sel == 3'd2 ? 12'hF80 :     // 128 MB
                        ram_sel == 3'd1 ? 12'hFC0 :     //  64 MB
                        ram_sel == 3'd4 ? 12'hFF0 :     //  16 MB
@@ -260,11 +290,24 @@ wire  [7:0] leds;
 wire        key_stb;
 wire  [7:0] key_code;
 
+// Input: Swap Alt/Win keys (status[19], at once): left Alt <-> left GUI,
+// right Alt <-> right GUI (ps2_key: [8] extended, [7:0] the set-2 code)
+function automatic [8:0] alt_win(input [8:0] k);
+	case (k)
+		9'h011: alt_win = 9'h11F;   // left Alt -> left GUI
+		9'h11F: alt_win = 9'h011;
+		9'h111: alt_win = 9'h127;   // right Alt -> right GUI
+		9'h127: alt_win = 9'h111;
+		default: alt_win = k;
+	endcase
+endfunction
+wire [10:0] kbd_key = status[19] ? {ps2_key[10:9], alt_win(ps2_key[8:0])} : ps2_key;
+
 ps2_hil_keymap keymap
 (
 	.clk(clk_sys),
 	.reset(reset),
-	.ps2_key(ps2_key),
+	.ps2_key(kbd_key),
 	.key_stb(key_stb),
 	.key_code(key_code)
 );
@@ -352,7 +395,7 @@ hp385_top machine
 	.pix_overlay(so_overlay),
 	.pix_rgb(so_rgb),
 
-	.lan_present(!status[15]),
+	.lan_present(cfg_lan),
 	.lan_tx_ready(lan_tx_ready),
 	.lan_tx_we(lan_tx_we),
 	.lan_tx_addr(lan_tx_addr),
@@ -398,7 +441,7 @@ rom_bram #(.AW(13)) card_rom
 // BSR checksum -> MOVEQ #0,D0 / NOP), as docs/disasm/tools/bootrom_simpatch.py
 // does for the sim.  Each word is replaced only if it holds the expected
 // original, so another ROM revision is left alone.
-wire fast_boot = !status[5];               // OSD: Yes is index 0, the default
+wire fast_boot = !cfg[5];                  // OSD: Yes is index 0, the default
 function [31:0] boot_patch;
 	input [31:0] q;
 	input [14:0] a;                           // longword address
@@ -476,7 +519,7 @@ lan_wire #(.CLK_HZ(33_000_000)) lan_wire
 (
 	.clk(clk_sys),
 	.reset(reset),
-	.ena(status[14:12] != 3'd1),
+	.ena(cfg_lan && status[14:12] != 3'd1),   // the card fitted, and a link chosen now
 	.mac(lan_padr),
 	.mac_stb(lan_padr_stb),
 	.tx_ready(lan_tx_ready),
