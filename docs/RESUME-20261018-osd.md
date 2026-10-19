@@ -12,12 +12,14 @@ Paste the prompt below into a new session to continue. The background follows it
 > The OSD standard this work follows is `docs/osd-standard.md` in the
 > HP 9000/715 repo (`hp9000-715`, commit a959e77).
 >
-> Work through "Remaining items" below in order. The core is about to be
-> released.
+> Work through "Remaining items" below in order: build, then test on the
+> board. The core is about to be released. The gate has already been run for
+> this change (see below), so skip it this time. Quartus needs only this repo:
+> no `scratch/`. The ROMs are already on the board's SD card.
 >
 > - **Process:**
 >   - Short sims only.
->   - `scripts/prebuild_gate.sh` must pass before every Quartus build.
+>   - `scripts/prebuild_gate.sh` must pass before every Quartus build that changes the machine RTL (`rtl/`). Not this time: see "Gate" below.
 >   - Build in the `build/wt_head` worktree (`git worktree add build/wt_head <commit>` if it isn't there). The `.rbf` is copied only on success.
 >   - Commit on master; never push. Don't push Main_MiSTer either.
 >   - If other sessions share the build machine, agree the Quartus order with them first and wrap the flow in `flock /tmp/quartus.lock`. The fitter needs about 3.6 GB. Never run two fitters, or a fitter next to a `-j 0` C++ build.
@@ -26,7 +28,7 @@ Paste the prompt below into a new session to continue. The background follows it
 >   - Load cores and mount images only through the OSD. Copying a `.rbf` with `tools/mister/board.sh push` is fine.
 >   - Shut guests down cleanly before any reset or image swap.
 >   - Log in as root and run commands yourself; don't hand the user steps. Ask before answering any guest-OS *setup* prompts.
-> - **Reporting:** report results with evidence (gate output, timing summary, board screenshots).
+> - **Reporting:** report results with evidence (timing summary, board screenshots).
 
 ---
 
@@ -57,29 +59,27 @@ Paste the prompt below into a new session to continue. The background follows it
   - There is a new OSD section with an MGL example for Load ROM.
 - **Main_MiSTer needs no change.** `support/hp9k/hp9k.cpp` reads only `[14:12]` by bit range, not by label.
 
-### Gate on `5f21c31` (run on m900; the machine RTL is unchanged since `fa70a88`, only the shell changed)
+### Gate on `5f21c31` (on m900)
 
-- All the unit benches passed, and so did the disk boot (ID 0).
-- The CD boot, soft reboot and LAN steps were still running when the session moved.
+- Since `fa70a88` only the shell changed; the machine RTL did not.
+- These steps passed: all the unit benches, the disk boot (ID 0) and the CD boot (ID 2).
+- The user stopped the gate during the soft-reboot step: the board test covers the rest.
 - The gate does not simulate `HP9K385.sv` (the sim top is `hp385_top`), so the Quartus build is the first check of the shell edits.
 
 ### Not done yet
 
-- No Quartus build of `5f21c31`, so nothing is on the board yet. The board still runs the release candidate `HP9K385_076aec6.rbf` (= `releases/HP9K385_20261017.rbf`, master `59b8b00`).
-- The build was taken out of m900's shared Quartus queue (Pippin, then the SS20 session). On another machine there is no queue, unless it is shared too.
+- `5f21c31` has not been built in Quartus yet, so nothing is on the board. The board still runs the release candidate `HP9K385_076aec6.rbf` (= `releases/HP9K385_20261017.rbf`, master `59b8b00`).
+- The build was taken out of m900's shared Quartus queue (Pippin, then the SS20 session) and moved to a free machine.
 
 ---
 
 ## Remaining items
 
-1. **Gate.** Run `scripts/prebuild_gate.sh` again on the build machine, and every step must pass. The machine needs:
-   - `scratch/` (git-ignored; the ROMs in `scratch/roms/` and the OpenBSD CD in `scratch/sw/OpenBSD55/`; it moves between machines as `scratch.zip`)
-   - Verilator, and `vasmm68k_mot` (used by `tools/cpubench` and `tools/rebootbench`)
-2. **Build** `5f21c31` (or later) in `build/wt_head` with Quartus 17.0.2 Lite: `quartus_sh --flow compile HP9K385`, about 28 min. The fitter uses seed 4 (`HP9K385.qsf`).
+1. **Build** `5f21c31` (or later) in `build/wt_head` with Quartus 17.0.2 Lite: `quartus_sh --flow compile HP9K385`, about 28 min. The fitter uses seed 4 (`HP9K385.qsf`).
    - Check timing in `output_files/HP9K385.sta.rpt`: setup and hold on clk_sys, clk_ram and pll_hdmi.
    - The shell changed, so seed 4 may no longer meet timing. If it misses, walk seeds as on 2026-10-17 (`build/seeds/`) and commit the seed that passes.
    - Copy the `.rbf` to `build/HP9K385_<commit>.rbf`.
-3. **Board test**, through the OSD as a user would:
+2. **Board test**, through the OSD as a user would:
    - Push and load the core. Then:
      - The top page matches the table above.
      - The P2, P3 and P5 pages open.
@@ -92,6 +92,6 @@ Paste the prompt below into a new session to continue. The background follows it
    - Swap Alt/Win keys: Yes, then in an hpterm L Win acts as Extend char and L Alt as Insert line. The mapping is the same as the HP 9000/715's (the PS/2 codes are swapped before `ps2_hil_keymap`).
    - NetBSD (`NetBSD92.img`): boots to login, the keyboard works, clean shutdown.
    - Save settings in the OSD with the final values (128MB, eth0, Fast boot Yes).
-4. **Release.** Once the board test passes, copy the `.rbf` to `releases/HP9K385_<date>.rbf` and commit it, replacing `HP9K385_20261017.rbf` (its OSD is the old one). Note the build and test in `docs/RESUME-20261016.md` or a new resume file.
+3. **Release.** Once the board test passes, copy the `.rbf` to `releases/HP9K385_<date>.rbf` and commit it, replacing `HP9K385_20261017.rbf` (its OSD is the old one). Note the build and test in `docs/RESUME-20261016.md` or a new resume file.
 
 The open items in `docs/RESUME-20261016.md` (the NetBSD HIL hang, SCSI read-ahead, the HP9K715 slot mask in Main, UnixBench) are unchanged.
